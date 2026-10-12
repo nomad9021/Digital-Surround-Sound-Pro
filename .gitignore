@@ -1,0 +1,15 @@
+# personal settings + paired-phone token hashes - never upload
+surround_config.json
+
+# generated at runtime
+gentle_tap.wav
+__pycache__/
+*.pyc
+
+# this PC's own https certificate + private key (made on first run)
+remote_cert.pem
+remote_key.pem
+remote_cert.ip
+
+# private Python environment made by the installers
+venv/

@@ -1,0 +1,4 @@
+# keep shell scripts runnable on Linux and .cmd files happy on Windows
+*.sh  text eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
