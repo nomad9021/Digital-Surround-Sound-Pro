@@ -16,6 +16,7 @@ import math
 import os
 import queue
 import secrets
+import socket
 import threading
 import time
 import tkinter as tk
@@ -25,6 +26,7 @@ from tkinter import ttk, messagebox
 import numpy as np
 import soundcard as sc
 
+import ambient
 import calibrate
 
 try:
@@ -323,7 +325,7 @@ class Output:
                     data, pos = data[used:], pos - used
 
                     if block[:, 8].max() > -1.5:            # calibrating: only my chirps, no music
-                        mine = np.abs(block[:, 8] - self.cal_index) < 0.01
+                        mine = (np.abs(block[:, 8] - self.cal_index) < 0.01) | (block[:, 8] > calibrate.ALL - 1)
                         chirp = block[:, 7] * mine * (0.6 * self.volume)
                         out = np.column_stack([chirp, chirp])
                     elif self.click_mode:
@@ -345,7 +347,8 @@ class Engine:
         self.error = None
         self.level = 0.0
         self.gain = 1.0               # input level (0-2), set from the app or phone
-        self.cal_request = None       # number of speakers to calibrate (set by the app)
+        self.cal_request = None       # (speakers, rounds) to calibrate (set by the app)
+        self.cal_cancel = False       # the phone stopped calibrating: end the chirps now
         self.cal = None
         self.sample = 0               # capture clock, in samples
 
@@ -395,8 +398,11 @@ class Engine:
 
     def cal_block(self, n):
         """Calibration columns for this block: chirp signal and whose turn it is."""
+        if self.cal_cancel:
+            self.cal, self.cal_cancel = None, False
         if self.cal_request:
-            self.cal = calibrate.Sequence(self.cal_request, self.sample + int(calibrate.LEAD * RATE))
+            n, rounds = self.cal_request
+            self.cal = calibrate.Sequence(n, self.sample + int(calibrate.LEAD * RATE), rounds)
             self.cal_request = None
         if self.cal:
             sig, owner, done = self.cal.block(self.sample, n)
@@ -601,6 +607,10 @@ class App:
         self.snapshot = {}
         self.dirty_at = None
         self.web = webremote.start(self, cfg.get("devices", [])) if webremote else None
+        # Govee lamps that follow the screen's colours
+        self.ambient = ambient.Ambient(cfg.get("ambient", {}), webremote.lan_ip() if webremote else None)
+        if self.ambient.want_on:
+            root.after(1500, self.ambient.start)
         self.build_topbar()
         self.build_toolbar()
         self.build_volbar()
@@ -707,6 +717,7 @@ class App:
         self.paint_mode()
 
         self.button(bar, "📱  Phone remote", self.open_phone).pack(side="right", padx=(6 * S, 0))
+        self.button(bar, "💡  Lights", self.open_lights).pack(side="right", padx=(6 * S, 0))
 
     # ---------------- phone pairing: one-time PIN shown while a phone asks to connect
     def build_pairbar(self):
@@ -1330,6 +1341,7 @@ class App:
                 "autostart": getattr(self, "autostart", True), "mode": self.mode,
                 "calibrated": self.calibrated,
                 "master": round(self.master.get()), "gain": round(self.engine.gain * 100),
+                "ambient": self.ambient.config(),
                 "devices": self.web.pairing.export() if self.web else self.load_cfg().get("devices", [])}
         try:
             with open(CONFIG, "w") as f:
@@ -1441,6 +1453,9 @@ class App:
         if visible:
             self.draw_waves()                      # no drawing while minimized
         self.web_tick()
+        if self.ambient.error:
+            self.flash(f"Lights: {self.ambient.error}", T["bad"])
+            self.ambient.error = None
         errs = [self.engine.error] + [o.error for o in self.outs.values()]
         errs = [e for e in errs if e]
         if errs:
@@ -1452,6 +1467,7 @@ class App:
     def on_close(self):
         self.engine.stop()
         self.save_cfg(quiet=True)
+        self.ambient.stop()                        # lamps go back to how they were
         if self.web:
             self.web.shutdown()
             if self.web.secure:
@@ -1503,7 +1519,11 @@ class App:
                 "win_volume": self.win_volume, "win_muted": self.win_muted,
                 "level": round(self.engine.level, 3) if self.engine.running else 0,
                 "source": self.source.get(), "sources": self.speaker_names,
-                "room": [ROOM_W, ROOM_D], "listener": self.listener, "speakers": sp}
+                "room": [ROOM_W, ROOM_D], "listener": self.listener, "speakers": sp,
+                "ambient": {"on": self.ambient.running, "brightness": self.ambient.brightness,
+                            "lamps": len(self.ambient.active()),
+                            "colors": ["#%02x%02x%02x" % self.ambient.colors[l["ip"]]
+                                       for l in self.ambient.active() if l["ip"] in self.ambient.colors]}}
 
     def web_cmd(self, c):
         t = c.get("type")
@@ -1523,9 +1543,18 @@ class App:
             self.apply_master()
             self.flash("Muted from phone" if self.muted_all else "Unmuted", T["accent"])
         elif t == "cal_start":
-            return self.cal_begin()
+            return self.cal_begin(int(num(c.get("pass", 0), 0, calibrate.MAX_PASSES - 1)))
         elif t == "cal_result":
             return self.cal_apply(c.get("results", []), c.get("quality", ""))
+        elif t == "cal_stop":
+            self.cal_plan = None
+            self.engine.cal_request = None
+            self.engine.cal_cancel = True
+            self.flash("Calibration stopped", T["muted"])
+        elif t == "ambient":
+            self.set_lights(bool(c.get("on")))
+        elif t == "ambient_brightness":
+            self.ambient.brightness = int(num(c.get("value", 100), 1, 100))
         elif t == "paired":                         # a phone entered the one-time PIN
             self.update_pairbar()
             self.flash(f"{c.get('name', 'Phone')} connected", T["good"])
@@ -1581,7 +1610,8 @@ class App:
         self.flash("All phones forgotten", T["muted"])
 
     # ---------------- auto-calibration with the phone's microphone
-    def cal_begin(self):
+    def cal_begin(self, pass_no=0):
+        """One measuring pass. Pass 0 is the long first measurement, later passes fine-tune."""
         if not self.engine.running:
             self.start(quiet=True)
         if not self.engine.running or not self.outs:
@@ -1589,27 +1619,41 @@ class App:
         order = list(self.outs)
         for i, sid in enumerate(order):
             self.outs[sid].cal_index = i
-        self.cal_plan = {"id": secrets.token_hex(6), "ids": order,
+        rounds = calibrate.rounds_for(pass_no)
+        self.cal_plan = {"id": secrets.token_hex(6), "ids": order, "pass": pass_no, "rounds": rounds,
                          "eff": {sid: self.outs[sid].delay_ms for sid in order},      # delay incl. distance
                          "vol": {sid: self.find(sid)["volume"] for sid in order}}
-        self.engine.cal_request = len(order)
-        self.flash("Calibrating — keep the room quiet", T["accent"])
-        return {"id": self.cal_plan["id"], "n": len(order), "record_s": calibrate.record_seconds(len(order)),
-                "names": [self.find(sid)["name"] for sid in order]}
+        self.engine.cal_request = (len(order), rounds)
+        self.flash("Calibrating — keep the room quiet" if pass_no == 0 else f"Fine-tuning (pass {pass_no + 1})",
+                   T["accent"])
+        return {"id": self.cal_plan["id"], "n": len(order), "record_s": calibrate.record_seconds(len(order), rounds),
+                "names": [self.find(sid)["name"] for sid in order], "pass": pass_no,
+                "max_passes": calibrate.MAX_PASSES, "tolerance_ms": calibrate.TOLERANCE_MS}
 
     def cal_apply(self, results, quality):
-        """Line every speaker up on the measured arrival times and even out the levels."""
+        """Line every speaker up on the measured arrival times and even out the levels.
+
+        The first pass sets everything outright; later passes measure what's left and
+        correct most of it (FINE_GAIN), so the speakers close in on one click.
+        """
         plan, self.cal_plan = self.cal_plan, None
         if not plan:
             return {"error": "That calibration already finished. Start a new one."}
+        first = plan["pass"] == 0
         pairs = list(zip(plan["ids"], results))
         heard = [(sid, r) for sid, r in pairs if r]
         missing = [self.find(sid)["name"] for sid, r in pairs if not r]
         if len(heard) < min(2, len(pairs)):
             return {"error": "Couldn't hear enough speakers (" + ", ".join(missing) + "). "
                              "Turn the volume up, keep the room quiet and try again.", "quality": quality}
-        latest = max(r["arrival_ms"] for _, r in heard)
-        eff = {sid: plan["eff"][sid] + (latest - r["arrival_ms"]) for sid, r in heard}
+        arrivals = [r["arrival_ms"] for _, r in heard]
+        latest, mid = max(arrivals), float(np.median(arrivals))
+        spread = latest - min(arrivals)                      # how far from one click this pass heard it
+        gain = 1.0 if first else calibrate.FINE_GAIN
+        eff = {}
+        for sid, r in heard:
+            need = latest - r["arrival_ms"]                  # more delay this speaker needs
+            eff[sid] = plan["eff"][sid] + (gain * need if first or need >= 0.5 else 0)
         low = min(eff.values())
         levels = sorted(r["level_db"] for _, r in heard)
         target = levels[len(levels) // 2]
@@ -1620,17 +1664,40 @@ class App:
                 report.append({"name": s["name"], "heard": False})
                 continue
             old_delay, old_vol = s["delay"], s["volume"]
-            s["delay"] = int(round(min(600, eff[sid] - low)))
-            s["volume"] = int(round(max(30, min(200, plan["vol"][sid] * 10 ** ((target - r["level_db"]) / 20)))))
+            s["delay"] = int(round(max(0, min(600, eff[sid] - low))))
+            db = target - r["level_db"]
+            if not first:
+                db = 0.5 * db if abs(db) > 1 else 0          # levels: small, calm steps after the first pass
+            s["volume"] = int(round(max(30, min(200, plan["vol"][sid] * 10 ** (db / 20)))))
             report.append({"name": s["name"], "heard": True, "delay": s["delay"], "old_delay": old_delay,
-                           "volume": s["volume"], "old_volume": old_vol})
+                           "volume": s["volume"], "old_volume": old_vol,
+                           "offset_ms": round(r["arrival_ms"] - mid, 1), "spread_ms": round(r["spread_ms"], 1)})
+        converged = spread <= calibrate.TOLERANCE_MS
         self.calibrated = True
         self.mix = compute_mix(self.speakers, self.listener, self.mode == "simple", self.calibrated)
         self.apply_mix()
         self.select(self.sel)
         self.save_cfg(quiet=True)
-        self.flash("Speakers calibrated from your seat", T["good"])
-        return {"ok": True, "speakers": report, "missing": missing, "quality": quality}
+        if converged or plan["pass"] + 1 >= calibrate.MAX_PASSES:
+            self.flash(f"Speakers calibrated: together within {spread:.1f} ms", T["good"])
+        return {"ok": True, "speakers": report, "missing": missing, "quality": quality, "pass": plan["pass"],
+                "spread_ms": round(spread, 1), "converged": converged,
+                "done": converged or plan["pass"] + 1 >= calibrate.MAX_PASSES}
+
+    # ---------------- ambient lights (Govee lamps follow the screen)
+    def set_lights(self, on):
+        self.ambient.want_on = on
+        if on and not self.ambient.start():
+            self.ambient.want_on = False
+        elif not on:
+            self.ambient.stop()
+        self.save_cfg(quiet=True)
+
+    def open_lights(self):
+        if getattr(self, "lights_win", None) and self.lights_win.winfo_exists():
+            self.lights_win.lift()
+            return
+        self.lights_win = LightsWindow(self)
 
     def open_phone(self):
         if getattr(self, "phone_win", None) and self.phone_win.winfo_exists():
@@ -1688,6 +1755,311 @@ class App:
         w.attributes("-topmost", True)                     # make sure it isn't hidden behind other windows
         w.after(400, lambda: w.attributes("-topmost", False))
         w.focus_force()
+
+
+class LightsWindow(tk.Toplevel):
+    """Govee lamps that take on the screen's colours: find them, pick sides, tune the look."""
+
+    PW, PH = 300, 169                     # preview of the screen (16:9)
+
+    def __init__(self, app):
+        super().__init__(app.root, bg=T["bg"])
+        self.app, self.amb = app, app.ambient
+        S = app.S
+        self.title("Ambient lights")
+        self.transient(app.root)
+        self.resizable(False, False)
+        if os.path.exists(ICON):
+            try:
+                self.iconbitmap(ICON)
+            except Exception:
+                pass
+        self.jobs = queue.Queue()         # results from background scans
+        self.preview = None               # last screenshot when the lights are off
+        self.preview_at = 0
+        pad = dict(padx=22 * S)
+
+        tk.Label(self, text="💡  Ambient lights", font=app.f_title, bg=T["bg"], fg=T["text"]).pack(
+            anchor="w", pady=(18 * S, 2 * S), **pad)
+        tk.Label(self, text="Govee lamps take on the colours of the screen, like Ambilight.",
+                 font=app.f_body, bg=T["bg"], fg=T["muted"]).pack(anchor="w", **pad)
+
+        self.cv = tk.Canvas(self, width=(self.PW + 170) * S, height=(self.PH + 24) * S, bg=T["bg"],
+                            highlightthickness=0)
+        self.cv.pack(pady=(12 * S, 6 * S), **pad)
+
+        row = tk.Frame(self, bg=T["bg"])
+        row.pack(fill="x", **pad)
+        self.toggle_btn = app.button(row, "Turn on", self.toggle, accent=True, width=10)
+        self.toggle_btn.pack(side="left")
+        self.status = tk.Label(row, font=app.f_body, bg=T["bg"], fg=T["muted"], anchor="w")
+        self.status.pack(side="left", padx=12 * S)
+
+        # ---- look
+        card = tk.Frame(self, bg=T["panel"], padx=16 * S, pady=10 * S)
+        card.pack(fill="x", pady=(12 * S, 0), **pad)
+        tk.Label(card, text="Screen to follow", font=app.f_small, bg=T["panel"], fg=T["muted"]).pack(anchor="w")
+        self.mons = ambient.monitors()
+        self.screen_var = tk.StringVar()
+        self.screen_box = ttk.Combobox(card, textvariable=self.screen_var, state="readonly", font=app.f_body,
+                                       values=[m["name"] for m in self.mons])
+        self.screen_box.pack(fill="x", pady=(2 * S, 0))
+        rect = self.amb.screen_rect()
+        self.screen_var.set(next((m["name"] for m in self.mons if m["rect"] == rect), self.mons[0]["name"]))
+        self.screen_box.bind("<<ComboboxSelected>>", lambda e: self.on_screen())
+        self.sliders = {}
+        for key, text, lo, hi, fmt in (("brightness", "Brightness", 1, 100, "{}%"),
+                                       ("smooth", "Smoothness", 0, 100, "{}"),
+                                       ("boost", "Colour boost", 100, 200, "{}%")):
+            self.slider(card, key, text, lo, hi, fmt)
+
+        # ---- lamps
+        lc = tk.Frame(self, bg=T["panel"], padx=16 * S, pady=10 * S)
+        lc.pack(fill="x", pady=(12 * S, 0), **pad)
+        head = tk.Frame(lc, bg=T["panel"])
+        head.pack(fill="x")
+        tk.Label(head, text="Lamps", font=app.f_head, bg=T["panel"], fg=T["text"]).pack(side="left")
+        self.find_btn = app.button(head, "🔍  Find lamps", self.find)
+        self.find_btn.pack(side="right")
+        self.lamp_box = tk.Frame(lc, bg=T["panel"])
+        self.lamp_box.pack(fill="x", pady=(8 * S, 0))
+        add = tk.Frame(lc, bg=T["panel"])
+        add.pack(fill="x", pady=(8 * S, 0))
+        tk.Label(add, text="Add by IP", font=app.f_small, bg=T["panel"], fg=T["muted"]).pack(side="left")
+        self.ip_var = tk.StringVar()
+        ip = tk.Entry(add, textvariable=self.ip_var, font=app.f_body, bg=T["panel2"], fg=T["text"],
+                      insertbackground=T["text"], relief="flat", width=16)
+        ip.pack(side="left", padx=8 * S, ipady=3 * S)
+        ip.bind("<Return>", lambda e: self.add_ip())
+        app.button(add, "Add", self.add_ip).pack(side="left")
+
+        tk.Label(self, text="First, in the Govee Home app open each lamp › ⚙ Settings › turn on LAN Control.\n"
+                            "Blink shows which lamp is which. Left/Right = which side of the picture it copies.\n"
+                            "Protected video (Netflix etc. in some browsers) can show up black to screen capture.",
+                 justify="left", font=app.f_small, bg=T["bg"], fg=T["muted"]).pack(anchor="w", pady=(10 * S, 18 * S), **pad)
+
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.render_lamps()
+        self.tick()
+        if not self.amb.lamps:
+            self.after(300, self.find)                       # first time: go looking right away
+
+    def slider(self, parent, key, text, lo, hi, fmt):
+        S = self.app.S
+        row = tk.Frame(parent, bg=T["panel"])
+        row.pack(fill="x", pady=(8 * S, 0))
+        tk.Label(row, text=text, width=12, anchor="w", font=self.app.f_small, bg=T["panel"],
+                 fg=T["muted"]).pack(side="left")
+        lbl = tk.Label(row, width=5, anchor="e", font=self.app.f_body, bg=T["panel"], fg=T["text"])
+        lbl.pack(side="right")
+        var = tk.DoubleVar(value=getattr(self.amb, key))
+
+        def moved(_):
+            v = round(var.get())
+            setattr(self.amb, key, v)
+            lbl.config(text=fmt.format(v))
+            self.app.dirty_at = time.time()                   # saved once the slider settles
+        ttk.Scale(row, from_=lo, to=hi, variable=var, command=moved).pack(side="left", fill="x", expand=True)
+        lbl.config(text=fmt.format(getattr(self.amb, key)))
+
+    def render_lamps(self):
+        S, app = self.app.S, self.app
+        for w in self.lamp_box.winfo_children():
+            w.destroy()
+        self.swatches = {}
+        if not self.amb.lamps:
+            tk.Label(self.lamp_box, text="No lamps yet. Press Find lamps.", font=app.f_body, bg=T["panel"],
+                     fg=T["muted"]).pack(anchor="w")
+        for lamp in self.amb.lamps:
+            r = tk.Frame(self.lamp_box, bg=T["panel2"], padx=8 * S, pady=5 * S)
+            r.pack(fill="x", pady=2 * S)
+            sw = tk.Canvas(r, width=20 * S, height=20 * S, bg=T["panel2"], highlightthickness=0)
+            sw.pack(side="left")
+            self.swatches[lamp["ip"]] = sw
+            txt = tk.Frame(r, bg=T["panel2"])
+            txt.pack(side="left", padx=8 * S)
+            tk.Label(txt, text=lamp.get("name") or "Govee lamp", font=app.f_body, bg=T["panel2"],
+                     fg=T["text"], anchor="w").pack(anchor="w")
+            tk.Label(txt, text=lamp["ip"], font=("Segoe UI", 8), bg=T["panel2"], fg=T["muted"],
+                     anchor="w").pack(anchor="w")
+            tk.Button(r, text="✕", command=lambda l=lamp: self.remove(l), relief="flat", bd=0, cursor="hand2",
+                      bg=T["panel2"], fg=T["bad"], activebackground=T["panel2"], font=app.f_body).pack(side="right")
+            app.button(r, "Blink", lambda ip=lamp["ip"]: self.amb.identify(ip)).pack(side="right", padx=4 * S)
+            en = tk.BooleanVar(value=lamp.get("enabled", True))
+            tk.Checkbutton(r, text="On", variable=en, font=app.f_small, bg=T["panel2"], fg=T["text"],
+                           selectcolor=T["panel"], activebackground=T["panel2"], activeforeground=T["text"],
+                           command=lambda l=lamp, v=en: self.set_lamp(l, "enabled", v.get())).pack(side="right")
+            zone = tk.StringVar(value=lamp.get("zone", "Whole screen"))
+            zb = ttk.Combobox(r, textvariable=zone, values=ambient.ZONE_NAMES, state="readonly", width=12,
+                              font=app.f_small)
+            zb.pack(side="right", padx=6 * S)
+            zb.bind("<<ComboboxSelected>>", lambda e, l=lamp, v=zone: self.set_lamp(l, "zone", v.get()))
+
+    def set_lamp(self, lamp, field, value):
+        lamp[field] = value
+        self.app.save_cfg(quiet=True)
+
+    def remove(self, lamp):
+        self.amb.lamps.remove(lamp)
+        if not self.amb.active() and self.amb.running:
+            self.app.set_lights(False)
+        self.render_lamps()
+        self.app.save_cfg(quiet=True)
+
+    def add_lamps(self, found):
+        """Add newly found lamps; the first goes on the left of the TV, the next on the right."""
+        have = {l["ip"] for l in self.amb.lamps}
+        new = 0
+        for d in found:
+            if d["ip"] in have:
+                continue
+            zones = {l.get("zone") for l in self.amb.lamps}
+            zone = "Left" if "Left" not in zones else "Right" if "Right" not in zones else "Whole screen"
+            self.amb.lamps.append({"ip": d["ip"], "name": f"Govee {d.get('sku') or 'lamp'}".strip(),
+                                   "sku": d.get("sku", ""), "zone": zone, "enabled": True})
+            new += 1
+        self.render_lamps()
+        self.app.save_cfg(quiet=True)
+        return new
+
+    def background(self, fn, done):
+        """Run fn() off the Tk thread; done(result or exception) runs back on it."""
+        def run():
+            try:
+                self.jobs.put((done, fn()))
+            except Exception as e:
+                self.jobs.put((done, e))
+        threading.Thread(target=run, daemon=True).start()
+
+    def find(self):
+        self.find_btn.config(state="disabled", text="Looking…")
+        known = [l["ip"] for l in self.amb.lamps]
+        self.background(lambda: ambient.scan(self.amb.local_ip, known), self.found)
+
+    def found(self, res):
+        self.find_btn.config(state="normal", text="🔍  Find lamps")
+        if isinstance(res, Exception):
+            self.app.flash(f"Couldn't look for lamps: {res}", T["bad"])
+            return
+        new = self.add_lamps(res)
+        if res:
+            self.app.flash(f"Found {len(res)} lamp{'s' * (len(res) != 1)}" + (f" ({new} new)" if new else ""),
+                           T["good"])
+        else:
+            messagebox.showinfo("Ambient lights",
+                                "No Govee lamps answered.\n\n"
+                                "• In the Govee Home app, open each lamp › ⚙ Settings › turn on LAN Control.\n"
+                                "• The lamps and this PC must be on the same network.\n"
+                                "• If Windows asked about network access for Python, allow it.\n\n"
+                                "You can also type a lamp's IP address (your router lists it) under Add by IP.",
+                                parent=self)
+
+    def add_ip(self):
+        ip = self.ip_var.get().strip()
+        try:
+            socket.inet_aton(ip)
+            if ip.count(".") != 3:
+                raise OSError
+        except OSError:
+            self.app.flash("That isn't an IP address (like 192.168.1.42)", T["bad"])
+            return
+        self.ip_var.set("")
+
+        def done(res):
+            info = res[0] if isinstance(res, list) and res else {"ip": ip}
+            self.add_lamps([info])
+            if not isinstance(res, list) or not res:
+                self.app.flash(f"Added {ip}, but it didn't answer yet: is LAN Control on?", T["bad"])
+        self.background(lambda: ambient.scan(self.amb.local_ip, [ip], timeout=1.2), done)
+
+    def on_screen(self):
+        m = next((m for m in self.mons if m["name"] == self.screen_var.get()), None)
+        if m:
+            self.amb.screen = m["rect"]
+            self.preview_at = 0
+            self.app.save_cfg(quiet=True)
+
+    def toggle(self):
+        self.app.set_lights(not self.amb.running)
+        if self.amb.error:
+            self.app.flash(self.amb.error, T["bad"])
+            self.amb.error = None
+
+    # ---- live preview: the screen, with each lamp glowing on its side
+    def tick(self):
+        if not self.winfo_exists():
+            return
+        while True:
+            try:
+                done, res = self.jobs.get_nowait()
+            except queue.Empty:
+                break
+            done(res)
+        on = self.amb.running
+        frame = self.amb.frame if on else None
+        if frame is None:
+            if time.time() - self.preview_at > 1.0:            # lights off: still show what they'd do
+                self.preview_at = time.time()
+                g = ambient.Grabber(self.amb.screen_rect())
+                img = g.grab()
+                g.close()
+                self.preview = None if img is None else (img * 255).astype(np.uint8)
+            frame = self.preview
+        colors = {}
+        for lamp in self.amb.lamps:
+            if on and lamp["ip"] in self.amb.colors:
+                colors[lamp["ip"]] = "#%02x%02x%02x" % self.amb.colors[lamp["ip"]]
+            elif frame is not None and lamp.get("enabled", True):
+                c = ambient.zone_color(frame.astype(np.float32) / 255, lamp.get("zone"), self.amb.boost / 100)
+                colors[lamp["ip"]] = "#%02x%02x%02x" % tuple(int(v * 255) for v in c)
+        self.draw(frame, colors)
+        for ip, sw in self.swatches.items():
+            sw.delete("all")
+            s = 20 * self.app.S
+            sw.create_oval(2, 2, s - 2, s - 2, fill=colors.get(ip, T["line"]), outline="")
+        self.toggle_btn.config(text="Turn off" if on else "Turn on")
+        self.toggle_btn._bg = T["panel2"] if on else T["accent"]
+        self.toggle_btn.config(bg=self.toggle_btn._bg)
+        n = len(self.amb.active())
+        self.status.config(text=f"On  ·  {n} lamp{'s' * (n != 1)}  ·  {self.amb.fps:.0f} updates/s" if on
+                           else "Off  ·  preview of what the lamps would show", fg=T["good"] if on else T["muted"])
+        self.after(100, self.tick)
+
+    def draw(self, frame, colors):
+        c, S = self.cv, self.app.S
+        c.delete("all")
+        W, H = self.PW * S, self.PH * S
+        x0, y0 = 85 * S, 6 * S
+        sides = {"Left": [], "Right": [], "Whole screen": []}
+        for lamp in self.amb.lamps:
+            sides.get(lamp.get("zone"), sides["Whole screen"]).append(lamp)
+        for side, cx in (("Left", 40 * S), ("Right", x0 + W + 45 * S)):
+            lamps = sides[side] or []
+            for i, lamp in enumerate(lamps):
+                cy = y0 + H / 2 + (i - (len(lamps) - 1) / 2) * 60 * S
+                col = colors.get(lamp["ip"])
+                if col:
+                    for r, fade in ((34, 0.75), (26, 0.5)):     # soft glow around the lamp
+                        c.create_oval(cx - r * S, cy - r * S, cx + r * S, cy + r * S, outline="",
+                                      fill=blend(col, T["bg"], fade))
+                c.create_oval(cx - 18 * S, cy - 18 * S, cx + 18 * S, cy + 18 * S, outline="",
+                              fill=col or T["panel2"])
+                c.create_text(cx, cy + 44 * S, text=(lamp.get("name") or "")[:14], fill=T["muted"],
+                              font=("Segoe UI", 8))
+        rrect(c, x0 - 6 * S, y0 - 6 * S, x0 + W + 6 * S, y0 + H + 6 * S, 8 * S, fill="#23262f", outline=T["wall"])
+        if frame is not None:
+            from PIL import Image, ImageTk
+            img = Image.fromarray(frame).resize((int(W), int(H)), Image.BILINEAR)
+            self._img = ImageTk.PhotoImage(img)
+            c.create_image(x0, y0, image=self._img, anchor="nw")
+        else:
+            c.create_text(x0 + W / 2, y0 + H / 2, text="(screen not visible)", fill=T["muted"], font=self.app.f_small)
+        for f in (ambient.ZONES["Left"][1], ambient.ZONES["Right"][0]):    # what each side copies
+            c.create_line(x0 + W * f, y0, x0 + W * f, y0 + H, fill="#ffffff", dash=(3, 4))
+        for i, lamp in enumerate(sides["Whole screen"]):
+            cx = x0 + W / 2 + (i - (len(sides["Whole screen"]) - 1) / 2) * 30 * S
+            c.create_oval(cx - 8 * S, y0 + H + 9 * S, cx + 8 * S, y0 + H + 25 * S, outline="",
+                          fill=colors.get(lamp["ip"], T["line"]))
 
 
 class SyncWizard(tk.Toplevel):

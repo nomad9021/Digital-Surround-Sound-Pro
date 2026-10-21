@@ -83,7 +83,21 @@ svg.i { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-widt
 .seg button { flex: 1; font-size: 13px; font-weight: 500; letter-spacing: -.08px; padding: 6px 4px; border-radius: 7px;
   transition: background .2s; }
 .seg button.on { background: #636366; box-shadow: 0 3px 8px rgba(0,0,0,.12), 0 3px 1px rgba(0,0,0,.04); font-weight: 600; }
-#padmode { margin-top: 12px; }
+.padbar { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
+.padbar .seg { flex: 1; }
+
+/* full-screen trackpad: the pad covers the whole phone, a few buttons float on top */
+body.padfull .pad { position: fixed; inset: 0; margin: 0; border-radius: 0; z-index: 15; min-height: 0;
+  background: radial-gradient(120% 80% at 50% 0%, #232325 0%, #161618 60%, #0e0e10 100%); }
+body.padfull #v-remote { bottom: 0; z-index: 15; }
+body.padfull .tabbar { display: none; }
+body.padfull .pad-hint { bottom: calc(env(safe-area-inset-bottom) + 18px); }
+.padtools { display: none; position: fixed; z-index: 16; gap: 10px;
+  top: calc(env(safe-area-inset-top) + 12px); right: max(14px, env(safe-area-inset-right)); }
+body.padfull .padtools { display: flex; }
+.padtools .round { width: 44px; height: 44px; background: rgba(58,58,60,.7);
+  -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }
+.padtools .round svg.i { width: 21px; height: 21px; stroke-width: 2.2; }
 
 .pad { flex: 1; min-height: 190px; margin: 12px 0 16px; border-radius: 30px; position: relative; overflow: hidden;
   background: radial-gradient(130% 100% at 50% 0%, #2c2c2e 0%, #1c1c1e 55%, #161618 100%);
@@ -216,6 +230,19 @@ select.pick { -webkit-appearance: none; appearance: none; background: none; bord
 .cal-res .row { min-height: 52px; }
 .cal-res .val b { color: var(--label); font-weight: 600; }
 .ok { color: var(--green); } .no { color: var(--red); }
+.cal-pass { text-align: center; font-size: 13px; color: var(--sec); margin: -4px 0 10px; letter-spacing: -.08px; }
+/* tuner: each speaker's dot slides toward the middle line as it gets in time */
+.tuner { background: var(--cell); border-radius: 10px; padding: 8px 14px; margin-bottom: 10px; }
+.tune { display: grid; grid-template-columns: 82px 1fr 62px; align-items: center; gap: 10px; min-height: 34px; }
+.tune .nm { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tune .tr { position: relative; height: 22px; }
+.tune .tr::before { content: ""; position: absolute; left: 0; right: 0; top: 10px; height: 2px; border-radius: 1px; background: var(--fill2); }
+.tune .tr::after { content: ""; position: absolute; left: calc(50% - 1px); top: 2px; width: 2px; height: 18px; border-radius: 1px; background: var(--green); opacity: .7; }
+.tune .dot2 { position: absolute; top: 3px; width: 16px; height: 16px; margin-left: -8px; border-radius: 50%; left: 50%;
+  background: var(--ter); transition: left .9s cubic-bezier(.32,.72,0,1), background .4s; }
+.tune .ms { font-size: 13px; color: var(--sec); text-align: right; font-variant-numeric: tabular-nums; }
+.swatches { display: flex; gap: 4px; }
+.swatches i { width: 12px; height: 12px; border-radius: 50%; background: var(--fill3); }
 
 #pin { position: fixed; inset: 0; z-index: 40; background: #000; display: flex; flex-direction: column; align-items: center;
   justify-content: center; padding: 24px; text-align: center; }
@@ -261,6 +288,9 @@ select.pick { -webkit-appearance: none; appearance: none; background: none; bord
     <symbol id="i-speakers" viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="3.2"/><circle cx="12" cy="14.6" r="3.6"/><circle cx="12" cy="7" r="1.4"/></symbol>
     <symbol id="i-pc" viewBox="0 0 24 24"><rect x="2.5" y="3.5" width="19" height="13" rx="2"/><path d="M8.5 20.5h7M12 16.5v4"/></symbol>
     <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2.5" width="6" height="11.5" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></symbol>
+    <symbol id="i-expand" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+    <symbol id="i-shrink" viewBox="0 0 24 24"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></symbol>
+    <symbol id="i-bulb" viewBox="0 0 24 24"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.3 1.1 2.2h5c0-.9.4-1.6 1.1-2.2A6 6 0 0 0 12 3z"/></symbol>
     <symbol id="i-input" viewBox="0 0 24 24"><path d="M3 12h3l2-5 4 10 3-7 2 2h4"/></symbol>
     <symbol id="k-Bluetooth speaker" viewBox="0 0 24 24"><rect x="1.8" y="7" width="20.4" height="10" rx="5"/><circle cx="6.8" cy="12" r="2.2"/><circle cx="17.2" cy="12" r="2.2"/></symbol>
     <symbol id="k-TV" viewBox="0 0 24 24"><rect x="2.5" y="4.5" width="19" height="12.5" rx="2"/><path d="M8.5 20.5h7M12 17v3.5"/></symbol>
@@ -288,9 +318,17 @@ select.pick { -webkit-appearance: none; appearance: none; background: none; bord
     <div class="prog"><span id="t-pos">0:00</span><div class="bar"><i id="t-bar"></i></div><span id="t-dur">0:00</span></div>
   </div>
 
-  <div class="seg" id="padmode">
-    <button data-mode="trackpad" class="on">Trackpad</button>
-    <button data-mode="dpad">D-pad</button>
+  <div class="padbar">
+    <div class="seg" id="padmode">
+      <button data-mode="trackpad" class="on">Trackpad</button>
+      <button data-mode="dpad">D-pad</button>
+    </div>
+    <button class="round" id="pad-full" aria-label="Full-screen trackpad"><svg class="i"><use href="#i-expand"/></svg></button>
+  </div>
+  <div class="padtools">
+    <button class="round" id="pad-kb" aria-label="Keyboard"><svg class="i"><use href="#i-kb"/></svg></button>
+    <button class="round" id="pad-play" aria-label="Play or pause"><svg class="i"><use href="#i-playpause"/></svg></button>
+    <button class="round" id="pad-exit" aria-label="Leave full screen"><svg class="i"><use href="#i-shrink"/></svg></button>
   </div>
 
   <div class="pad" id="pad">
@@ -360,7 +398,21 @@ select.pick { -webkit-appearance: none; appearance: none; background: none; bord
         <span class="chev"><svg class="i"><use href="#i-chev"/></svg></span>
       </div>
     </div>
-    <div class="sf">Each speaker plays a short chirp. Your phone listens from where you sit, then the delays and volumes are set so everything reaches you together and evenly.</div>
+    <div class="sf">Each speaker plays a short chirp. Your phone listens from where you sit, sets the delays and volumes, then keeps re-checking and fine-tuning until every speaker lands as one click.</div>
+
+    <div class="sh">Ambient lights</div>
+    <div class="group">
+      <div class="row ic">
+        <div class="tile" style="background:#ff9f0a"><svg class="i"><use href="#i-bulb"/></svg></div>
+        <div class="grow"><div class="t1">Match the screen</div><div class="t2" id="amb-sub">Govee lamps</div></div>
+        <div class="swatches" id="amb-sw"></div>
+        <input type="checkbox" class="sw" id="amb-on">
+      </div>
+    </div>
+    <div class="cards" style="margin-top:10px">
+      <div class="cc" id="amb-br"><div class="fill"></div><div class="lab"><svg class="i"><use href="#i-bulb"/></svg>Light brightness<span class="pc" id="amb-br-pc">100%</span></div></div>
+    </div>
+    <div class="sf">Your Govee lamps take on the colours of each side of the screen. Add the lamps from 💡 Lights on the PC.</div>
 
     <div class="sh">Room</div>
     <div class="room"><svg id="room" viewBox="0 0 800 600"></svg></div>
@@ -382,13 +434,15 @@ select.pick { -webkit-appearance: none; appearance: none; background: none; bord
   <div class="grab"></div>
   <h2>Auto-calibrate</h2>
   <div id="cal-intro">
-    <div class="cal-steps">1. Sit where you normally listen.<br>2. Hold the phone at <b>ear height</b>, microphone facing the room.<br>3. Keep the room <b>quiet</b> for about 15 seconds.</div>
+    <div class="cal-steps">1. Sit where you normally listen.<br>2. Hold the phone at <b>ear height</b>, microphone facing the room, and keep it still.<br>3. Keep the room <b>quiet</b> for about a minute: it measures, adjusts, and measures again until every speaker lands as one click.</div>
   </div>
   <div id="cal-run" hidden>
     <div class="cal-ring"><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" fill="none" stroke="#3a3a3c" stroke-width="8"/>
       <circle id="cal-arc" cx="60" cy="60" r="52" fill="none" stroke="#bf5af2" stroke-width="8" stroke-linecap="round" stroke-dasharray="327" stroke-dashoffset="327"/></svg>
       <div class="num" id="cal-num"></div></div>
+    <div class="cal-pass" id="cal-pass"></div>
   </div>
+  <div class="tuner" id="cal-tune" hidden></div>
   <div class="cal-status" id="cal-status"></div>
   <div class="group cal-res" id="cal-res" hidden></div>
   <div class="sheet-btns">
@@ -627,6 +681,25 @@ function setPadMode(m) {
 }
 $$("#padmode button").forEach(b => b.onclick = () => { haptic(); setPadMode(b.dataset.mode); });
 
+// full-screen trackpad: the whole phone becomes the pad (remembered for next time)
+let padWake = null;
+async function setPadFull(on) {
+  document.body.classList.toggle("padfull", on);
+  localStorage.setItem("padfull", on ? "1" : "");
+  try {                                                   // Android: real full screen (iPhone: home-screen app already is)
+    if (on && !document.fullscreenElement && document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen();
+    if (!on && document.fullscreenElement) await document.exitFullscreen();
+  } catch (e) {}
+  try {                                                   // keep the phone awake while it's a trackpad
+    if (on && !padWake && navigator.wakeLock) padWake = await navigator.wakeLock.request("screen");
+    if (!on && padWake) { padWake.release(); padWake = null; }
+  } catch (e) {}
+}
+press($("#pad-full"), () => setPadFull(true));
+press($("#pad-exit"), () => setPadFull(false));
+press($("#pad-kb"), () => openKb());
+press($("#pad-play"), () => api({ type: "media", action: "play_pause" }));
+
 let mv = { x: 0, y: 0, busy: false }, sc = { x: 0, y: 0, busy: false };
 async function flush(q, type) {
   if (q.busy) return;
@@ -727,6 +800,10 @@ const sendGain = throttle(v => api({ type: "gain", value: v }), 80);
 const sendWin = throttle(v => api({ type: "win_volume", value: v }), 80);
 const winvol = ccSlider($("#winvol"), f => { const v = Math.round(f * 100); $("#winvol-pc").textContent = v + "%"; if (S) S.app.win_volume = v; sendWin(v); });
 const gain = ccSlider($("#gain"), f => { const v = Math.round(f * 200); $("#gain-pc").textContent = v + "%"; if (S) S.app.gain = v; sendGain(v); });
+
+const sendAmbBr = throttle(v => api({ type: "ambient_brightness", value: v }), 120);
+const ambBr = ccSlider($("#amb-br"), f => { const v = Math.max(1, Math.round(f * 100)); $("#amb-br-pc").textContent = v + "%"; if (S) S.app.ambient.brightness = v; sendAmbBr(v); });
+$("#amb-on").onchange = e => { haptic(); api({ type: "ambient", on: e.target.checked }); setTimeout(poll1, 600); };
 
 $("#running").onchange = e => { haptic(); api({ type: e.target.checked ? "start" : "stop" }); };
 $$("#mode button").forEach(b => b.onclick = () => { haptic(); api({ type: "mode", mode: b.dataset.mode }); if (S) { S.app.mode = b.dataset.mode; render(); } });
@@ -876,6 +953,16 @@ function render() {
     src.innerHTML = ""; for (const n of a.sources) { const o = document.createElement("option"); o.value = o.textContent = n; src.appendChild(o); }
     src.value = a.source; src.dataset.v = a.sources.join("|") + a.source;
   }
+  const amb = a.ambient;
+  if (amb) {
+    if (document.activeElement !== $("#amb-on")) $("#amb-on").checked = amb.on;
+    $("#amb-sub").textContent = !amb.lamps ? "No lamps yet: add them on the PC" : amb.on ? `On · ${amb.lamps} lamp${amb.lamps === 1 ? "" : "s"}` : "Off";
+    $("#amb-sub").classList.toggle("bad", !amb.lamps);
+    const sw = $("#amb-sw");
+    if (sw.children.length !== amb.colors.length) sw.innerHTML = "<i></i>".repeat(amb.colors.length);
+    amb.colors.forEach((c, i) => { sw.children[i].style.background = c; });
+    ambBr.set(amb.brightness / 100); if (!ambBr.dragging) $("#amb-br-pc").textContent = amb.brightness + "%";
+  }
   if (room.dataset.ids !== a.speakers.map(s => s.id + s.icon + s.name + s.color).join(",")) buildRoom();
   if (!dragging) placeRoom();
   renderSpeakers();
@@ -890,61 +977,110 @@ function openCal() {
     location.href = `https://${location.hostname}:8766/#cal&t=${encodeURIComponent(TOKEN)}`;
     return;
   }
-  $("#cal-intro").hidden = false; $("#cal-run").hidden = true; $("#cal-res").hidden = true;
+  $("#cal-intro").hidden = false; $("#cal-run").hidden = true; $("#cal-res").hidden = true; $("#cal-tune").hidden = true;
   $("#cal-status").textContent = ""; $("#cal-go").textContent = "Start"; $("#cal-go").disabled = false;
   $("#cal-close").textContent = "Cancel";
   calSheet.classList.add("show"); scrim.classList.add("show");
 }
 function closeCal() { if (!calBusy) { calSheet.classList.remove("show"); scrim.classList.remove("show"); } }
 $("#cal-open").onclick = () => { haptic(); openCal(); };
-$("#cal-close").onclick = closeCal;
+$("#cal-close").onclick = () => {
+  if (!calBusy) return closeCal();
+  calAbort = true; $("#cal-close").disabled = true; $("#cal-status").textContent = "Stopping…";
+};
 $("#cal-go").onclick = () => { haptic(); runCal(); };
 function calProgress(f, label) {
   $("#cal-arc").style.strokeDashoffset = 327 * (1 - Math.max(0, Math.min(1, f)));
   $("#cal-num").textContent = label;
 }
+// tuner: a dot per speaker, off to the side when it's early/late, on the middle line when it's in time
+function tunerSetup(names) {
+  const t = $("#cal-tune"); t.innerHTML = ""; t.hidden = false;
+  for (const n of names) {
+    const r = document.createElement("div"); r.className = "tune";
+    r.innerHTML = '<div class="nm"></div><div class="tr"><i class="dot2"></i></div><div class="ms">…</div>';
+    r.querySelector(".nm").textContent = n; t.appendChild(r);
+  }
+}
+function tunerShow(speakers, tol) {
+  const rows = $$("#cal-tune .tune");
+  speakers.forEach((s, i) => {
+    const r = rows[i]; if (!r) return;
+    const dot = r.querySelector(".dot2"), ms = r.querySelector(".ms");
+    if (!s.heard) { dot.style.left = "50%"; dot.style.background = "var(--ter)"; ms.textContent = "not heard"; return; }
+    const off = s.offset_ms, mag = Math.min(1, Math.log1p(Math.abs(off)) / Math.log1p(150));   // log scale: 1 ms still shows
+    dot.style.left = (50 + Math.sign(off) * mag * 46) + "%";
+    dot.style.background = Math.abs(off) <= tol / 2 ? "var(--green)" : Math.abs(off) <= 10 ? "var(--orange)" : "var(--red)";
+    ms.textContent = (off > 0 ? "+" : "") + off.toFixed(1) + " ms";
+  });
+}
+let calAbort = false;
 async function runCal() {
-  calBusy = true;
-  $("#cal-go").disabled = true; $("#cal-close").disabled = true;
-  $("#cal-intro").hidden = true; $("#cal-res").hidden = true; $("#cal-run").hidden = false;
-  calProgress(0, ""); $("#cal-status").textContent = "Starting the microphone…";
-  let stream, ctx, wake;
+  calBusy = true; calAbort = false;
+  $("#cal-go").disabled = true; $("#cal-close").disabled = false; $("#cal-close").textContent = "Stop";
+  $("#cal-intro").hidden = true; $("#cal-res").hidden = true; $("#cal-tune").hidden = true; $("#cal-run").hidden = false;
+  calProgress(0, ""); $("#cal-pass").textContent = ""; $("#cal-status").textContent = "Starting the microphone…";
+  let stream, ctx, wake, recording = false, chunks = [];
+  const before = {}, spreads = [];                       // settings before the first pass, how close each pass got
+  let last = null;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: {
       echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } });
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     await ctx.resume();
     try { wake = await navigator.wakeLock.request("screen"); } catch (e) {}
-    const chunks = [];
     const proc = ctx.createScriptProcessor(4096, 1, 1);
-    proc.onaudioprocess = e => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    proc.onaudioprocess = e => { if (recording) chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
     ctx.createMediaStreamSource(stream).connect(proc);
     proc.connect(ctx.destination);                       // (outputs silence; needed for processing to run)
     await sleep(400);
-    const r = await fetch("/api/cmd", { method: "POST", headers: auth({ "Content-Type": "application/json" }),
-                                        body: JSON.stringify({ type: "cal_start" }) });
-    const plan = await r.json();
-    if (!r.ok || plan.error) throw new Error(plan.error || "The PC didn't start the calibration.");
-    $("#cal-status").textContent = `Listening to ${plan.names.join(", ")}… stay quiet`;
-    const t0 = performance.now(), total = plan.record_s * 1000;
-    while (performance.now() - t0 < total) {
-      const left = (total - (performance.now() - t0)) / 1000;
-      calProgress((performance.now() - t0) / total, Math.ceil(left));
-      await sleep(200);
+    for (let pass = 0; ; pass++) {
+      chunks = []; recording = true;
+      await sleep(300);
+      const r = await fetch("/api/cmd", { method: "POST", headers: auth({ "Content-Type": "application/json" }),
+                                          body: JSON.stringify({ type: "cal_start", pass }) });
+      const plan = await r.json();
+      if (!r.ok || plan.error) throw new Error(plan.error || "The PC didn't start the calibration.");
+      if (pass === 0) tunerSetup(plan.names);
+      $("#cal-pass").textContent = pass === 0 ? `Pass 1 · measuring every speaker`
+                                              : `Pass ${pass + 1} of up to ${plan.max_passes} · fine-tuning`;
+      $("#cal-status").textContent = pass === 0 ? `Listening to ${plan.names.join(", ")}… stay quiet`
+                                                : "Checking the new timing… stay quiet";
+      const t0 = performance.now(), total = plan.record_s * 1000;
+      while (performance.now() - t0 < total && !calAbort) {
+        const left = (total - (performance.now() - t0)) / 1000;
+        calProgress((performance.now() - t0) / total, Math.ceil(left));
+        await sleep(200);
+      }
+      recording = false;
+      if (calAbort) { await api({ type: "cal_stop" }); break; }
+      calProgress(1, "✓"); $("#cal-status").textContent = "Measuring…";
+      const len = chunks.reduce((a, c) => a + c.length, 0), pcm = new Int16Array(len);
+      let o = 0;
+      for (const c of chunks) for (let i = 0; i < c.length; i++) pcm[o++] = Math.max(-1, Math.min(1, c[i])) * 32767;
+      const up = await fetch("/api/cal/upload", { method: "POST", body: pcm.buffer,
+        headers: auth({ "Content-Type": "application/octet-stream", "X-Rate": String(ctx.sampleRate), "X-Plan": plan.id }) });
+      const res = await up.json();
+      if (res.error) {
+        if (!last) throw new Error(res.error);
+        $("#cal-status").textContent = res.error + " Kept the last good settings."; break;
+      }
+      for (const s of res.speakers) if (s.heard && !(s.name in before)) before[s.name] = { delay: s.old_delay, volume: s.old_volume };
+      last = res; spreads.push(res.spread_ms);
+      tunerShow(res.speakers, plan.tolerance_ms); haptic();
+      if (res.done) break;
+      $("#cal-status").textContent = `${res.spread_ms.toFixed(1)} ms apart · adjusting…`;
+      await sleep(900);                                  // let the dots settle so you can see them move
+      if (calAbort) break;
     }
-    proc.disconnect(); stream.getTracks().forEach(t => t.stop());
-    calProgress(1, "✓"); $("#cal-status").textContent = "Measuring…";
-    const len = chunks.reduce((a, c) => a + c.length, 0), pcm = new Int16Array(len);
-    let o = 0;
-    for (const c of chunks) for (let i = 0; i < c.length; i++) pcm[o++] = Math.max(-1, Math.min(1, c[i])) * 32767;
-    const up = await fetch("/api/cal/upload", { method: "POST", body: pcm.buffer,
-      headers: auth({ "Content-Type": "application/octet-stream", "X-Rate": String(ctx.sampleRate), "X-Plan": plan.id }) });
-    showCalResult(await up.json());
+    proc.disconnect();
+    if (last) showCalResult(last, before, spreads);
+    else if (calAbort) { $("#cal-status").textContent = "Stopped. Nothing was changed."; $("#cal-run").hidden = true; $("#cal-intro").hidden = false; }
   } catch (e) {
     const denied = e && (e.name === "NotAllowedError" || e.name === "SecurityError");
     $("#cal-status").textContent = denied ? "Microphone access was blocked. Allow it for this page and try again."
                                           : (e.message || "Something went wrong.");
-    $("#cal-run").hidden = true; $("#cal-intro").hidden = false;
+    $("#cal-run").hidden = true; $("#cal-intro").hidden = !!last;
   } finally {
     if (stream) stream.getTracks().forEach(t => t.stop());
     if (ctx) ctx.close();
@@ -954,15 +1090,18 @@ async function runCal() {
     $("#cal-go").textContent = "Run again"; $("#cal-close").textContent = "Done";
   }
 }
-function showCalResult(res) {
+function showCalResult(res, before, spreads) {
   $("#cal-run").hidden = true;
-  if (res.error) { $("#cal-status").textContent = res.error; $("#cal-intro").hidden = false; return; }
-  $("#cal-status").innerHTML = '<span class="ok">Calibrated.</span> Everything now reaches your seat together.';
+  const trail = spreads.map(s => s.toFixed(1)).join(" → ") + " ms";
+  $("#cal-status").innerHTML = res.converged
+    ? `<span class="ok">All in one click.</span> Every speaker reaches you within ${res.spread_ms.toFixed(1)} ms.<br><span style="font-size:13px">${trail}</span>`
+    : `Close: within ${res.spread_ms.toFixed(1)} ms. Run again to keep tuning.<br><span style="font-size:13px">${trail}</span>`;
   const g = $("#cal-res"); g.innerHTML = ""; g.hidden = false;
   for (const s of res.speakers) {
+    const b = before[s.name] || { delay: s.old_delay, volume: s.old_volume };
     const row = document.createElement("div"); row.className = "row";
     row.innerHTML = s.heard
-      ? `<div class="grow"><div class="t1"></div><div class="t2">was ${s.old_delay} ms · ${s.old_volume}%</div></div>
+      ? `<div class="grow"><div class="t1"></div><div class="t2">was ${b.delay} ms · ${b.volume}%</div></div>
          <div class="val"><b>${s.delay} ms</b> · ${s.volume}%</div>`
       : '<div class="grow"><div class="t1"></div><div class="t2 bad">Not heard: unchanged</div></div>';
     row.querySelector(".t1").textContent = s.name;
@@ -974,7 +1113,12 @@ function showCalResult(res) {
 /* ---------- boot ---------- */
 setPadMode(padMode);
 showTab(tab);
-document.addEventListener("visibilitychange", () => { if (!document.hidden && polling) poll1(); });
+if (localStorage.getItem("padfull") && tab === "remote") setPadFull(true);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && polling) poll1();
+  if (!document.hidden && document.body.classList.contains("padfull") && navigator.wakeLock)   // the lock ends when hidden
+    navigator.wakeLock.request("screen").then(w => { padWake = w; }).catch(() => {});
+});
 // no zooming at all: pinch (iOS gesture events) and the double-tap fallback on older browsers
 ["gesturestart", "gesturechange", "gestureend"].forEach(t => document.addEventListener(t, e => e.preventDefault()));
 document.addEventListener("dblclick", e => e.preventDefault(), { passive: false });

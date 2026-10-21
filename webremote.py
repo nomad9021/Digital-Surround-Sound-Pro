@@ -31,7 +31,7 @@ SECURE_PORT = 8766          # https: phones only allow the microphone (calibrati
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(APP_DIR, "web")
 MIXER_CMDS = {"start", "stop", "master", "master_step", "mute_all", "mode", "gain", "source",
-              "speaker", "listener", "win_volume"}
+              "speaker", "listener", "win_volume", "cal_stop", "ambient", "ambient_brightness"}
 
 
 def lan_ip():
@@ -452,7 +452,7 @@ def calibration_upload(app, body, rate, plan_id):
     if not plan or plan["id"] != plan_id:
         return {"error": "That calibration already finished. Start a new one."}
     rec = np.frombuffer(body[: len(body) // 2 * 2], "<i2").astype(np.float32) / 32768
-    results, quality = calibrate.analyze(rec, rate, len(plan["ids"]))
+    results, quality = calibrate.analyze(rec, rate, len(plan["ids"]), plan["rounds"])
     return ask_app(app, {"type": "cal_result", "results": results, "quality": quality})
 
 
@@ -537,7 +537,7 @@ def make_handler(app, media, pairing):
             if not self._authed():
                 return
             if c.get("type") == "cal_start":
-                return self._json(ask_app(app, {"type": "cal_start"}))
+                return self._json(ask_app(app, {"type": "cal_start", "pass": c.get("pass", 0)}))
             if c.get("type") in MIXER_CMDS:
                 app.submit(c)
                 return self._json({"ok": True})

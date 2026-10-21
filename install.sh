@@ -14,7 +14,7 @@ BIN="$HOME/.local/bin/surround-mixer"
 MENU="$HOME/.local/share/applications/surround-mixer.desktop"
 AUTOSTART="$HOME/.config/autostart/surround-mixer.desktop"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FILES=(surround_mixer.py webremote.py calibrate.py linux_io.py make_icon.py requirements-linux.txt README.md)
+FILES=(surround_mixer.py webremote.py calibrate.py ambient.py linux_io.py make_icon.py requirements-linux.txt README.md)
 
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m%s\033[0m\n' "$*"; }

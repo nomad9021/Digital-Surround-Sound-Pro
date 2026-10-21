@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 
 $Dest = Join-Path $env:LOCALAPPDATA 'Programs\SurroundMixer'
 $Src = $PSScriptRoot
-$Files = 'surround_mixer.py', 'webremote.py', 'calibrate.py', 'linux_io.py', 'make_icon.py', 'surround.ico',
+$Files = 'surround_mixer.py', 'webremote.py', 'calibrate.py', 'ambient.py', 'linux_io.py', 'make_icon.py', 'surround.ico',
          'requirements.txt', 'README.md'
 $Desktop = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Surround Mixer.lnk'
 $StartMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Surround Mixer.lnk'

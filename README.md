@@ -10,10 +10,15 @@ Bluetooth speakers (built and tested with two JBL Flips). Comes with a phone rem
   where it stands (front / center / surround / sub).
 - **Auto-calibration with your phone**: hold the phone at your seat; each speaker plays a short chirp
   in turn and the phone's microphone measures when and how loud each one arrives. Delays and volumes are
-  then set so everything reaches you together and evenly, Bluetooth lag and distance included.
+  then set so everything reaches you together and evenly, Bluetooth lag and distance included. It then
+  re-checks in shorter passes, nudging the delays closer each time (shown as a tuner on the phone), until
+  every speaker lands within 2 ms of the others: one click.
+- **Ambient lights**: Govee lamps beside the TV take on the colours of the screen (left lamp = left side
+  of the picture, right lamp = right side), over Govee's local LAN API. Turn on *LAN Control* for each
+  lamp in the Govee Home app, then use **💡 Lights** on the PC; on/off and brightness are on the phone too.
 - **Sync wizard** for lining speakers up by ear, and drift held by gentle resampling (no dropouts).
 - **Computer volume passthrough**: the phone's + / − press the real volume keys.
-- **Phone remote** (iOS-style web app): Apple TV–style trackpad / D-pad, ±10 s skip, play/pause,
+- **Phone remote** (iOS-style web app): Apple TV–style trackpad / D-pad (with a full-screen trackpad mode), ±10 s skip, play/pause,
   next/prev, now playing with artwork, keyboard, and a full speaker mixer.
 - **One-time PIN pairing**: a phone asks to connect, the PC shows a fresh PIN until the phone enters it
   (or you press ✕). Paired phones get their own token; only its hash is stored.
@@ -56,7 +61,8 @@ isn't private: tap *Show Details › visit this website*.
 |---|---|
 | `surround_mixer.py` | Desktop app (Tkinter): audio engine, room map, sync wizard, calibration |
 | `webremote.py` | Web server (http + https), pairing, trackpad/keyboard input, now playing |
-| `calibrate.py` | Calibration chirps and the measurement (matched filter) |
+| `calibrate.py` | Calibration chirps and the measurement (matched filter, drift correction, passes) |
+| `ambient.py` | Ambient lights: screen capture and Govee LAN control |
 | `linux_io.py` | Linux versions of the Windows-only parts (pactl, xdotool, playerctl) |
 | `web/index.html` | The phone app |
 | `install.ps1`, `Install.cmd`, `install.sh` | Installers |
