@@ -614,6 +614,7 @@ class App:
         self.build_topbar()
         self.build_toolbar()
         self.build_volbar()
+        self.build_lightsbar()
         self.build_pairbar()
         self.build_banner()
         body = tk.Frame(root, bg=T["bg"])
@@ -782,6 +783,49 @@ class App:
         if IS_WIN:
             self.button(bar, "🔔  Windows sounds…", self.open_sounds).pack(side="right", padx=(0, 10 * S))
         self.sync_win_volume(force=True)
+
+    # ---------------- ambient lights: quick switch + brightness (same as on the phone)
+    def build_lightsbar(self):
+        S = self.S
+        bar = self.lightsbar = tk.Frame(self.root, bg=T["panel"], padx=12 * S, pady=8 * S)
+        bar.pack(fill="x", padx=16 * S, pady=(0, 10 * S))
+        tk.Label(bar, text="💡  Ambient lights", font=self.f_body, bg=T["panel"], fg=T["text"]).pack(side="left")
+        self.lights_on = tk.BooleanVar(value=self.ambient.want_on)
+        tk.Checkbutton(bar, text="On", variable=self.lights_on, command=lambda: self.set_lights(self.lights_on.get()),
+                       font=self.f_body, bg=T["panel"], fg=T["text"], selectcolor=T["panel2"],
+                       activebackground=T["panel"], activeforeground=T["text"], cursor="hand2").pack(side="left", padx=(10 * S, 0))
+        tk.Label(bar, text="Brightness", font=self.f_small, bg=T["panel"], fg=T["muted"]).pack(side="left", padx=(14 * S, 6 * S))
+        self.light_br = tk.DoubleVar(value=self.ambient.brightness)
+
+        def moved(_):
+            self.ambient.brightness = max(1, round(self.light_br.get()))
+            self.light_br_lbl.config(text=f"{self.ambient.brightness}%")
+            self.dirty_at = time.time()
+        ttk.Scale(bar, from_=1, to=100, variable=self.light_br, length=180 * S, command=moved).pack(side="left")
+        self.light_br_lbl = tk.Label(bar, text=f"{self.ambient.brightness}%", width=5, font=self.f_body,
+                                     bg=T["panel"], fg=T["text"], anchor="w")
+        self.light_br_lbl.pack(side="left", padx=(6 * S, 0))
+        self.light_sw = tk.Canvas(bar, width=60 * S, height=16 * S, bg=T["panel"], highlightthickness=0)
+        self.light_sw.pack(side="left", padx=(8 * S, 0))
+        self.light_info = tk.Label(bar, font=self.f_small, bg=T["panel"], fg=T["muted"])
+        self.light_info.pack(side="left", padx=(8 * S, 0))
+        self.button(bar, "Set up lamps…", self.open_lights).pack(side="right")
+
+    def update_lightsbar(self):
+        """Follow changes made from the phone or the Lights window."""
+        amb = self.ambient
+        if self.lights_on.get() != amb.running:
+            self.lights_on.set(amb.running)
+        if round(self.light_br.get()) != amb.brightness:
+            self.light_br.set(amb.brightness)
+            self.light_br_lbl.config(text=f"{amb.brightness}%")
+        S = self.S
+        self.light_sw.delete("all")
+        for i, l in enumerate(amb.active()[:4]):
+            col = "#%02x%02x%02x" % amb.colors[l["ip"]] if l["ip"] in amb.colors else T["line"]
+            self.light_sw.create_oval(i * 15 * S + 1, 2 * S, i * 15 * S + 13 * S, 14 * S, fill=col, outline="")
+        n = len(amb.active())
+        self.light_info.config(text="no lamps yet" if not n else f"{n} lamp{'s' * (n != 1)}")
 
     def windows_ep(self):
         """Volume control of Windows' default output - the exact one the keyboard keys change."""
@@ -1503,6 +1547,7 @@ class App:
         if n % 3 == 0:
             self.sync_win_volume()                         # follow the keys / taskbar / phone
             self.update_pairbar()                          # a phone asking to connect?
+            self.update_lightsbar()
             self.snapshot = self.build_snapshot()
 
     def build_snapshot(self):
