@@ -822,7 +822,7 @@ class App:
         S = self.S
         self.light_sw.delete("all")
         for i, l in enumerate(amb.active()[:4]):
-            col = "#%02x%02x%02x" % amb.colors[l["ip"]] if l["ip"] in amb.colors else T["line"]
+            col = "#%02x%02x%02x" % amb.colors[ambient.lamp_key(l)] if ambient.lamp_key(l) in amb.colors else T["line"]
             self.light_sw.create_oval(i * 15 * S + 1, 2 * S, i * 15 * S + 13 * S, 14 * S, fill=col, outline="")
         n = len(amb.active())
         self.light_info.config(text="no lamps yet" if not n else f"{n} lamp{'s' * (n != 1)}")
@@ -1567,8 +1567,8 @@ class App:
                 "room": [ROOM_W, ROOM_D], "listener": self.listener, "speakers": sp,
                 "ambient": {"on": self.ambient.running, "brightness": self.ambient.brightness,
                             "lamps": len(self.ambient.active()),
-                            "colors": ["#%02x%02x%02x" % self.ambient.colors[l["ip"]]
-                                       for l in self.ambient.active() if l["ip"] in self.ambient.colors]}}
+                            "colors": ["#%02x%02x%02x" % self.ambient.colors[ambient.lamp_key(l)]
+                                       for l in self.ambient.active() if ambient.lamp_key(l) in self.ambient.colors]}}
 
     def web_cmd(self, c):
         t = c.get("type")
@@ -1911,7 +1911,7 @@ class LightsWindow(tk.Toplevel):
         S, app = self.app.S, self.app
         for w in self.lamp_box.winfo_children():
             w.destroy()
-        self.swatches = {}
+        self.swatches, self.links = {}, {}
         if not self.amb.lamps:
             tk.Label(self.lamp_box, text="No lamps yet. Press Find lamps.", font=app.f_body, bg=T["panel"],
                      fg=T["muted"]).pack(anchor="w")
@@ -1920,16 +1920,18 @@ class LightsWindow(tk.Toplevel):
             r.pack(fill="x", pady=2 * S)
             sw = tk.Canvas(r, width=20 * S, height=20 * S, bg=T["panel2"], highlightthickness=0)
             sw.pack(side="left")
-            self.swatches[lamp["ip"]] = sw
+            self.swatches[ambient.lamp_key(lamp)] = sw
             txt = tk.Frame(r, bg=T["panel2"])
             txt.pack(side="left", padx=8 * S)
             tk.Label(txt, text=lamp.get("name") or "Govee lamp", font=app.f_body, bg=T["panel2"],
                      fg=T["text"], anchor="w").pack(anchor="w")
-            tk.Label(txt, text=lamp["ip"], font=("Segoe UI", 8), bg=T["panel2"], fg=T["muted"],
-                     anchor="w").pack(anchor="w")
+            link = tk.Label(txt, text=self.amb.link_state(lamp), font=("Segoe UI", 8), bg=T["panel2"],
+                            fg=T["muted"], anchor="w")
+            link.pack(anchor="w")
+            self.links[ambient.lamp_key(lamp)] = (lamp, link)
             tk.Button(r, text="✕", command=lambda l=lamp: self.remove(l), relief="flat", bd=0, cursor="hand2",
                       bg=T["panel2"], fg=T["bad"], activebackground=T["panel2"], font=app.f_body).pack(side="right")
-            app.button(r, "Blink", lambda ip=lamp["ip"]: self.amb.identify(ip)).pack(side="right", padx=4 * S)
+            app.button(r, "Blink", lambda l=lamp: self.amb.identify(l)).pack(side="right", padx=4 * S)
             en = tk.BooleanVar(value=lamp.get("enabled", True))
             tk.Checkbutton(r, text="On", variable=en, font=app.f_small, bg=T["panel2"], fg=T["text"],
                            selectcolor=T["panel"], activebackground=T["panel2"], activeforeground=T["text"],
@@ -1953,10 +1955,13 @@ class LightsWindow(tk.Toplevel):
 
     def add_lamps(self, found):
         """Add newly found lamps; the first goes on the left of the TV, the next on the right."""
-        have = {l["ip"] for l in self.amb.lamps}
+        have = {l.get("ip") for l in self.amb.lamps}
         new = 0
         for d in found:
             if d["ip"] in have:
+                for l in self.amb.lamps:                     # answers over Wi-Fi after all: no Bluetooth needed
+                    if l.get("ip") == d["ip"]:
+                        l.pop("ble", None)
                 continue
             zones = {l.get("zone") for l in self.amb.lamps}
             zone = "Left" if "Left" not in zones else "Right" if "Right" not in zones else "Whole screen"
@@ -1978,24 +1983,56 @@ class LightsWindow(tk.Toplevel):
 
     def find(self):
         self.find_btn.config(state="disabled", text="Looking…")
-        known = [l["ip"] for l in self.amb.lamps]
-        self.background(lambda: ambient.scan(self.amb.local_ip, known), self.found)
+        known = [l["ip"] for l in self.amb.lamps if l.get("ip")]
+
+        def both():
+            try:
+                lan = ambient.scan(self.amb.local_ip, known)
+            except OSError:
+                lan = []
+            try:
+                ble = ambient.ble_scan()
+            except Exception:                                  # no Bluetooth adapter / bleak missing
+                ble = None
+            return lan, ble
+        self.background(both, self.found)
 
     def found(self, res):
         self.find_btn.config(state="normal", text="🔍  Find lamps")
         if isinstance(res, Exception):
             self.app.flash(f"Couldn't look for lamps: {res}", T["bad"])
             return
-        new = self.add_lamps(res)
-        if res:
-            self.app.flash(f"Found {len(res)} lamp{'s' * (len(res) != 1)}" + (f" ({new} new)" if new else ""),
+        lan, ble = res
+        new = self.add_lamps(lan)
+        on_wifi = {d["ip"] for d in lan}
+        seen = {d["ble"]: d for d in ble or []}
+        linked = 0
+        # lamps that don't answer over Wi-Fi: use Bluetooth (its address is the Wi-Fi MAC + 1)
+        for l in self.amb.lamps:
+            if l.get("ip") in on_wifi or l.get("ble") or not l.get("mac"):
+                continue
+            l["ble"] = ambient.mac_plus(l["mac"])
+            linked += 1
+        mine = {l.get("ble") for l in self.amb.lamps}
+        for d in seen.values():                                # other Govee bulbs nearby: listed, but off
+            if d["ble"] not in mine:
+                self.amb.lamps.append({"ble": d["ble"], "name": d["name"], "sku": d["sku"],
+                                       "zone": "Whole screen", "enabled": False})
+                new += 1
+        self.render_lamps()
+        self.app.save_cfg(quiet=True)
+        if lan or seen or linked:
+            bits = [f"{len(lan)} on Wi-Fi"] if lan else []
+            bits += [f"{len(seen)} over Bluetooth"] if seen else []
+            bits += [f"{linked} switched to Bluetooth"] if linked else []
+            self.app.flash("Lamps: " + ", ".join(bits) + (f" ({new} new, added switched off)" if new else ""),
                            T["good"])
         else:
             messagebox.showinfo("Ambient lights",
-                                "No Govee lamps answered.\n\n"
-                                "• In the Govee Home app, open each lamp › ⚙ Settings › turn on LAN Control.\n"
-                                "• The lamps and this PC must be on the same network.\n"
-                                "• If Windows asked about network access for Python, allow it.\n\n"
+                                "No Govee lamps answered over Wi-Fi or Bluetooth.\n\n"
+                                "• Wi-Fi: in the Govee Home app, open each lamp › ⚙ Settings › turn on LAN Control.\n"
+                                "• Bluetooth: close the Govee app on your phone (it holds the lamp's\n"
+                                "  Bluetooth connection) and keep the lamps within range of this PC.\n\n"
                                 "You can also type a lamp's IP address (your router lists it) under Add by IP.",
                                 parent=self)
 
@@ -2052,12 +2089,16 @@ class LightsWindow(tk.Toplevel):
             frame = self.preview
         colors = {}
         for lamp in self.amb.lamps:
-            if on and lamp["ip"] in self.amb.colors:
-                colors[lamp["ip"]] = "#%02x%02x%02x" % self.amb.colors[lamp["ip"]]
+            if on and ambient.lamp_key(lamp) in self.amb.colors:
+                colors[ambient.lamp_key(lamp)] = "#%02x%02x%02x" % self.amb.colors[ambient.lamp_key(lamp)]
             elif frame is not None and lamp.get("enabled", True):
                 c = ambient.zone_color(frame.astype(np.float32) / 255, lamp.get("zone"), self.amb.boost / 100)
-                colors[lamp["ip"]] = "#%02x%02x%02x" % tuple(int(v * 255) for v in c)
+                colors[ambient.lamp_key(lamp)] = "#%02x%02x%02x" % tuple(int(v * 255) for v in c)
         self.draw(frame, colors)
+        for lamp, link in self.links.values():
+            text = self.amb.link_state(lamp)
+            if link.cget("text") != text:
+                link.config(text=text, fg=T["good"] if text.endswith("connected") else T["muted"])
         for ip, sw in self.swatches.items():
             sw.delete("all")
             s = 20 * self.app.S
@@ -2082,7 +2123,7 @@ class LightsWindow(tk.Toplevel):
             lamps = sides[side] or []
             for i, lamp in enumerate(lamps):
                 cy = y0 + H / 2 + (i - (len(lamps) - 1) / 2) * 60 * S
-                col = colors.get(lamp["ip"])
+                col = colors.get(ambient.lamp_key(lamp))
                 if col:
                     for r, fade in ((34, 0.75), (26, 0.5)):     # soft glow around the lamp
                         c.create_oval(cx - r * S, cy - r * S, cx + r * S, cy + r * S, outline="",
@@ -2104,7 +2145,7 @@ class LightsWindow(tk.Toplevel):
         for i, lamp in enumerate(sides["Whole screen"]):
             cx = x0 + W / 2 + (i - (len(sides["Whole screen"]) - 1) / 2) * 30 * S
             c.create_oval(cx - 8 * S, y0 + H + 9 * S, cx + 8 * S, y0 + H + 25 * S, outline="",
-                          fill=colors.get(lamp["ip"], T["line"]))
+                          fill=colors.get(ambient.lamp_key(lamp), T["line"]))
 
 
 class SyncWizard(tk.Toplevel):

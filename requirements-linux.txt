@@ -4,3 +4,4 @@ soundcard
 qrcode
 pillow
 cryptography
+bleak

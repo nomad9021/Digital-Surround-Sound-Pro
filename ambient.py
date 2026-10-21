@@ -253,13 +253,174 @@ def status(ips, timeout=0.8):
             if cmd == "devStatus"}
 
 
+# -------------------------------------------------------- Bluetooth ----
+#
+# Govee bulbs whose LAN control doesn't work (H6008: the ports answer "unreachable")
+# still take the commands the Govee app sends up close over Bluetooth LE:
+# 20-byte packets, 0x33 = set, 0xAA = query/keep-alive, last byte = XOR of the rest.
+# H6008 colour: 33 05 0D R G B. Brightness: 33 04 0-255. Power: 33 01 00/01.
+
+BLE_WRITE = "00010203-0405-0607-0809-0a0b0c0d2b11"
+BLE_NOTIFY = "00010203-0405-0607-0809-0a0b0c0d2b10"
+BLE_NAMES = ("ihoment_", "govee_", "minger_")
+
+
+def ble_packet(*data):
+    b = list(data) + [0] * (19 - len(data))
+    x = 0
+    for v in b:
+        x ^= v
+    return bytes(b + [x])
+
+
+def mac_plus(mac, n=1):
+    """Govee's Bluetooth address is its Wi-Fi MAC plus one: 60:74:f4:ac:a6:a6 -> 60:74:F4:AC:A6:A7."""
+    v = int(mac.replace(":", "").replace("-", ""), 16) + n
+    h = f"{v:012X}"
+    return ":".join(h[i:i + 2] for i in range(0, 12, 2))
+
+
+def ble_scan(timeout=8.0):
+    """Govee lamps advertising over Bluetooth: [{"ble", "name", "sku", "rssi"}]."""
+    import asyncio
+    from bleak import BleakScanner
+
+    async def run():
+        found = await BleakScanner.discover(timeout=timeout, return_adv=True)
+        out = []
+        for addr, (d, adv) in found.items():
+            name = d.name or adv.local_name or ""
+            if name.lower().startswith(BLE_NAMES):
+                parts = name.split("_")
+                out.append({"ble": addr.upper(), "name": name, "sku": parts[1] if len(parts) > 1 else "",
+                            "rssi": adv.rssi})
+        return out
+    return asyncio.run(run())
+
+
+class BleLink:
+    """Keeps a Bluetooth connection to each lamp and sends it the newest colour.
+
+    Runs its own asyncio loop in a thread. Only the latest colour is kept per lamp,
+    so a slow or reconnecting lamp never builds up a backlog. On first connect it
+    reads the lamp's colour and brightness so they can be put back afterwards.
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.pending = {}            # addr -> {"power": .., "bright": .., "color": ..}
+        self.state = {}              # addr -> "connecting" | "connected" | "not found" | error text
+        self.saved = {}              # addr -> {"color": (r, g, b), "bright": v}
+        self.tasks = {}
+        self.loop = None
+        threading.Thread(target=self._thread, daemon=True).start()
+
+    def _thread(self):
+        import asyncio
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
+    def _call(self, fn):
+        while self.loop is None:
+            time.sleep(0.01)
+        self.loop.call_soon_threadsafe(fn)
+
+    def set(self, addr, **kw):
+        with self.lock:
+            self.pending.setdefault(addr, {}).update(kw)
+
+    def connect(self, addrs):
+        """Stay connected to exactly these lamps."""
+        def apply():
+            for a in list(self.tasks):
+                if a not in addrs:
+                    self.tasks.pop(a).cancel()
+            for a in addrs:
+                if a not in self.tasks or self.tasks[a].done():
+                    self.tasks[a] = self.loop.create_task(self._lamp(a))
+        self._call(apply)
+
+    async def _lamp(self, addr):
+        import asyncio
+        from bleak import BleakClient, BleakScanner
+        while True:
+            try:
+                self.state[addr] = "connecting"
+                dev = await BleakScanner.find_device_by_address(addr, timeout=12.0)
+                if dev is None:
+                    self.state[addr] = "not found"          # busy with the Govee app, or out of range
+                    await asyncio.sleep(5)
+                    continue
+                async with BleakClient(dev, timeout=20.0) as c:
+                    def note(_, d, addr=addr):
+                        s = self.saved.setdefault(addr, {})
+                        if d[0] == 0xAA and d[1] == 0x05 and "color" not in s:
+                            s["color"] = (d[3], d[4], d[5])
+                        elif d[0] == 0xAA and d[1] == 0x04 and "bright" not in s:
+                            s["bright"] = d[2]
+                    try:
+                        await c.start_notify(BLE_NOTIFY, note)
+                        if addr not in self.saved:            # remember how it was, to put it back later
+                            await c.write_gatt_char(BLE_WRITE, ble_packet(0xAA, 0x05, 0x01), response=False)
+                            await asyncio.sleep(0.15)
+                            await c.write_gatt_char(BLE_WRITE, ble_packet(0xAA, 0x04), response=False)
+                    except Exception:
+                        pass
+                    self.state[addr] = "connected"
+                    last = time.time()
+                    while c.is_connected:
+                        with self.lock:
+                            want = self.pending.pop(addr, None)
+                        if want:
+                            if "power" in want:
+                                await c.write_gatt_char(BLE_WRITE, ble_packet(0x33, 0x01, int(want["power"])),
+                                                        response=False)
+                            if "bright" in want:
+                                await c.write_gatt_char(BLE_WRITE, ble_packet(0x33, 0x04, int(want["bright"])),
+                                                        response=False)
+                            if "color" in want:
+                                r, g, b = want["color"]
+                                await c.write_gatt_char(BLE_WRITE, ble_packet(0x33, 0x05, 0x0D, r, g, b),
+                                                        response=False)
+                            last = time.time()
+                        elif time.time() - last > 2:          # keep-alive, or the lamp drops us
+                            await c.write_gatt_char(BLE_WRITE, ble_packet(0xAA, 0x01), response=False)
+                            last = time.time()
+                        await asyncio.sleep(0.06)
+            except asyncio.CancelledError:
+                self.state.pop(addr, None)
+                raise
+            except Exception as e:
+                self.state[addr] = f"error: {e}"[:80]
+                await asyncio.sleep(3)
+
+
+_ble = None
+
+
+def ble_link():
+    """The one Bluetooth link (made on first use; needs the bleak package)."""
+    global _ble
+    if _ble is None:
+        _ble = BleLink()
+    return _ble
+
+
 # ----------------------------------------------------------- engine ----
 
+def lamp_key(lamp):
+    return lamp.get("ble") or lamp.get("ip")
+
+
 class Ambient:
-    """Runs the screen -> lamps loop in its own thread. Settings are plain attributes."""
+    """Runs the screen -> lamps loop in its own thread. Settings are plain attributes.
+
+    A lamp with a "ble" address is driven over Bluetooth, otherwise over Wi-Fi (LAN API).
+    """
 
     def __init__(self, cfg, local_ip=None):
-        self.lamps = [dict(l) for l in cfg.get("lamps", []) if l.get("ip")]
+        self.lamps = [dict(l) for l in cfg.get("lamps", []) if l.get("ip") or l.get("ble")]
         self.screen = cfg.get("screen")                     # [x, y, w, h] of the chosen screen
         self.brightness = int(cfg.get("brightness", 100))
         self.smooth = int(cfg.get("smooth", 45))
@@ -268,11 +429,11 @@ class Ambient:
         self.local_ip = local_ip
         self.running = False
         self.thread = None
-        self.colors = {}                                    # ip -> (r, g, b) last sent
+        self.colors = {}                                    # lamp key -> (r, g, b) last sent
         self.frame = None                                   # last capture, uint8, for the preview
         self.fps = 0.0
         self.error = None
-        self.blink = {}                                     # ip -> until when the loop leaves it alone
+        self.blink = {}                                     # lamp key -> until when the loop leaves it alone
         self.tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     def config(self):
@@ -282,6 +443,13 @@ class Ambient:
     def active(self):
         return [l for l in self.lamps if l.get("enabled", True)]
 
+    def link_state(self, lamp):
+        """How the lamp is reached, for the UI."""
+        if lamp.get("ble"):
+            st = _ble.state.get(lamp["ble"]) if _ble else None
+            return "Bluetooth" + (f" · {st}" if st else "")
+        return f"Wi-Fi · {lamp['ip']}"
+
     def screen_rect(self):
         mons = monitors()
         for m in mons:
@@ -289,15 +457,32 @@ class Ambient:
                 return m["rect"]
         return next((m["rect"] for m in mons if m["primary"]), mons[0]["rect"])
 
+    # ---- talking to one lamp (Wi-Fi or Bluetooth)
     def send(self, ip, cmd, data):
         try:
             self.tx.sendto(_packet(cmd, data), (ip, CMD_PORT))
         except OSError:
             pass
 
-    def set_color(self, ip, rgb, kelvin=0):
+    def power(self, lamp, on):
+        if lamp.get("ble"):
+            ble_link().set(lamp["ble"], power=1 if on else 0)
+        else:
+            self.send(lamp["ip"], "turn", {"value": 1 if on else 0})
+
+    def bright(self, lamp, pct):
+        pct = max(1, min(100, int(pct)))
+        if lamp.get("ble"):
+            ble_link().set(lamp["ble"], bright=max(1, round(pct * 2.55)))
+        else:
+            self.send(lamp["ip"], "brightness", {"value": pct})
+
+    def color(self, lamp, rgb, kelvin=0):
         r, g, b = (int(v) for v in rgb)
-        self.send(ip, "colorwc", {"color": {"r": r, "g": g, "b": b}, "colorTemInKelvin": int(kelvin)})
+        if lamp.get("ble"):
+            ble_link().set(lamp["ble"], color=(r, g, b))
+        else:
+            self.send(lamp["ip"], "colorwc", {"color": {"r": r, "g": g, "b": b}, "colorTemInKelvin": int(kelvin)})
 
     # ---- on / off
     def start(self):
@@ -307,6 +492,12 @@ class Ambient:
         if not self.active():
             self.error = "Add a lamp first (Find lamps)."
             return False
+        if any(l.get("ble") for l in self.active()):
+            try:
+                import bleak  # noqa: F401
+            except ImportError:
+                self.error = "Bluetooth lamps need the 'bleak' package (pip install bleak)."
+                return False
         self.error = None
         self.running = True
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -319,38 +510,69 @@ class Ambient:
         if t and t.is_alive() and t is not threading.current_thread():
             t.join(timeout=2.0)                             # let it put the lamps back the way they were
 
-    def identify(self, ip):
+    def identify(self, lamp):
         """Blink one lamp so you can tell which one it is."""
+        key = lamp_key(lamp)
+
         def run():
-            self.blink[ip] = time.time() + 2.4
-            before = {} if self.running else status([ip])
-            self.send(ip, "turn", {"value": 1})
+            self.blink[key] = time.time() + 3.0
+            if lamp.get("ble"):
+                ble_link().connect(self._ble_addrs() | {lamp["ble"]})
+                for _ in range(40):                         # give it a moment to connect
+                    if _ble.state.get(lamp["ble"]) == "connected":
+                        break
+                    time.sleep(0.25)
+                before = {}
+            else:
+                before = {} if self.running else status([lamp["ip"]])
+            self.power(lamp, True)
             for _ in range(3):
-                self.set_color(ip, (255, 90, 0))
+                self.color(lamp, (255, 90, 0))
                 time.sleep(0.4)
-                self.set_color(ip, (4, 4, 4))
+                self.color(lamp, (4, 4, 4))
                 time.sleep(0.35)
-            self.colors.pop(ip, None)                       # make the loop send its colour again
-            self.blink.pop(ip, None)
+            self.colors.pop(key, None)                      # make the loop send its colour again
+            self.blink.pop(key, None)
+            if lamp.get("ble") and not self.running:
+                self._restore_ble([lamp])
+                time.sleep(0.8)
+                ble_link().connect(self._ble_addrs())       # lights off: let go of it again
             self._restore(before)
         threading.Thread(target=run, daemon=True).start()
 
+    def _ble_addrs(self):
+        return {l["ble"] for l in self.active() if l.get("ble")} if self.running else set()
+
     def _restore(self, saved):
+        """Wi-Fi lamps: back to the state read before we started."""
         for ip, d in saved.items():
             c = d.get("color") or {}
-            self.set_color(ip, (c.get("r", 255), c.get("g", 255), c.get("b", 255)), d.get("colorTemInKelvin", 0))
+            lamp = {"ip": ip}
+            self.color(lamp, (c.get("r", 255), c.get("g", 255), c.get("b", 255)), d.get("colorTemInKelvin", 0))
             if d.get("brightness"):
-                self.send(ip, "brightness", {"value": int(d["brightness"])})
+                self.bright(lamp, d["brightness"])
             if not d.get("onOff", 1):
-                self.send(ip, "turn", {"value": 0})
+                self.power(lamp, False)
+
+    def _restore_ble(self, lamps):
+        for l in lamps:
+            s = _ble.saved.get(l["ble"], {}) if _ble else {}
+            if "color" in s:
+                ble_link().set(l["ble"], color=s["color"])
+            if "bright" in s:
+                ble_link().set(l["ble"], bright=s["bright"])
 
     def _run(self):
+        lan = [l for l in self.active() if not l.get("ble")]
+        ble = [l for l in self.active() if l.get("ble")]
         try:
-            saved = status([l["ip"] for l in self.active()])
+            saved = status([l["ip"] for l in lan])
         except OSError:
             saved = {}
+        if ble:
+            ble_link().connect({l["ble"] for l in ble})
         for l in self.active():
-            self.send(l["ip"], "turn", {"value": 1})
+            self.power(l, True)
         grab, rect, bright_sent = None, None, None
         state, last_send = {}, {}
         frames, t_fps = 0, time.time()
@@ -365,32 +587,34 @@ class Ambient:
                     grab, rect = Grabber(want), want
                 img = grab.grab()
                 lamps = self.active()
+                if ble:
+                    ble_link().connect({l["ble"] for l in lamps if l.get("ble")})   # follow lamps switched on/off
                 if img is not None:
                     self.frame = (img * 255).astype(np.uint8)
                     if bright_sent != self.brightness:
                         bright_sent = self.brightness
                         for l in lamps:
-                            self.send(l["ip"], "brightness", {"value": max(1, min(100, bright_sent))})
+                            self.bright(l, bright_sent)
                     tau = 0.03 + (self.smooth / 100) ** 2 * 1.5          # seconds to follow a change
                     base = 1 - math.exp(-period / tau)
                     now = time.time()
                     for l in lamps:
-                        ip = l["ip"]
-                        if self.blink.get(ip, 0) > now:
+                        key = lamp_key(l)
+                        if self.blink.get(key, 0) > now:
                             continue
                         target = zone_color(img, l.get("zone", "Whole screen"), self.boost / 100)
-                        s = state.setdefault(ip, target.copy())
+                        s = state.setdefault(key, target.copy())
                         a = max(base, 0.6) if np.abs(target - s).max() > 0.45 else base   # scene cut: catch up fast
                         s += a * (target - s)
                         v = np.clip(s, 0, 1) * 255
                         if v.max() < 4:                                  # black screen: just a faint glow
                             v = np.full(3, 4.0)
                         rgb = tuple(int(round(x)) for x in v)
-                        old = self.colors.get(ip)
+                        old = self.colors.get(key)
                         if old is None or max(abs(p - q) for p, q in zip(rgb, old)) >= 2 \
-                                or now - last_send.get(ip, 0) > 2:       # resend now and then: UDP can drop
-                            self.set_color(ip, rgb)
-                            self.colors[ip], last_send[ip] = rgb, now
+                                or now - last_send.get(key, 0) > 2:      # resend now and then: UDP can drop
+                            self.color(l, rgb)
+                            self.colors[key], last_send[key] = rgb, now
                     frames += 1
                 if time.time() - t_fps >= 1:
                     self.fps, frames, t_fps = frames / (time.time() - t_fps), 0, time.time()
@@ -404,3 +628,7 @@ class Ambient:
             self.colors = {}
             self.fps = 0.0
             self._restore(saved)
+            if ble:
+                self._restore_ble(ble)
+                time.sleep(0.8)                             # let the restore go out, then free the radio
+                ble_link().connect(set())
