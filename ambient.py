@@ -26,7 +26,8 @@ SCAN_ADDR = ("239.255.255.250", 4001)
 REPLY_PORT = 4002
 CMD_PORT = 4003
 CAP_W, CAP_H = 64, 36
-FPS = 12                      # Govee lamps start dropping commands when sent much faster than this
+FPS = 30                      # screen checks per second (Bluetooth lamps take each colour in ~40 ms)
+LAN_RATE = 12                 # Wi-Fi lamps start dropping commands when sent much faster than this
 ZONES = {"Left": (0.0, 0.4), "Right": (0.6, 1.0), "Whole screen": (0.0, 1.0)}
 ZONE_NAMES = list(ZONES)
 
@@ -151,6 +152,75 @@ class Grabber:
             _gdi32.DeleteDC(self.mdc)
             _user32.ReleaseDC(None, self.hdc)
         self.hdc = None
+
+
+class DXGrabber:
+    """Frames straight from the graphics card (Desktop Duplication, via dxcam).
+
+    About 0.1 ms a grab instead of 100+ ms for GDI on a 4K screen, and a new frame
+    only arrives when the picture changed (otherwise the last one is returned).
+    """
+
+    def __init__(self, rect):
+        import dxcam
+        self.cam, self.last = None, None
+        for dev in range(4):
+            for out in range(8):
+                try:
+                    cam = dxcam.create(device_idx=dev, output_idx=out, output_color="BGRA")
+                except Exception:
+                    break
+                d = cam._output.desc.DesktopCoordinates
+                if rect is None or [d.left, d.top, d.right - d.left, d.bottom - d.top] == list(rect):
+                    self.cam = cam
+                    return
+        raise RuntimeError("screen not found for Desktop Duplication")
+
+    def grab(self):
+        try:
+            f = self.cam.grab()
+        except Exception:
+            return None                                      # display mode change, UAC prompt: try again
+        if f is None:
+            return self.last
+        h, w = f.shape[:2]
+        sy, sx = max(1, h // (CAP_H * 4)), max(1, w // (CAP_W * 4))
+        sub = f[sy // 2::sy, sx // 2::sx][:CAP_H * 4, :CAP_W * 4, 2::-1].astype(np.float32)
+        if sub.shape[:2] != (CAP_H * 4, CAP_W * 4):
+            return self.last
+        self.last = sub.reshape(CAP_H, 4, CAP_W, 4, 3).mean((1, 3)) / 255    # 4x4 average per cell
+        return self.last
+
+    def close(self):
+        pass                                                 # dxcam keeps one camera per screen; reused
+
+
+_grabbers = {}
+_grab_lock = threading.Lock()
+
+
+class SharedGrabber:
+    """One grabber per screen, safe to use from the lights thread and the preview at once."""
+
+    def __init__(self, rect):
+        key = tuple(rect) if rect else None
+        with _grab_lock:
+            if key not in _grabbers:
+                g = None
+                if IS_WIN:
+                    try:
+                        g = DXGrabber(rect)
+                    except Exception:
+                        g = None                             # no dxcam / remote desktop: GDI still works
+                _grabbers[key] = g or Grabber(rect)
+            self.g = _grabbers[key]
+
+    def grab(self):
+        with _grab_lock:
+            return self.g.grab()
+
+    def close(self):
+        pass
 
 
 def zone_color(img, zone, boost=1.3):
@@ -299,18 +369,27 @@ def ble_scan(timeout=8.0):
 
 
 class BleLink:
-    """Keeps a Bluetooth connection to each lamp and sends it the newest colour.
+    """Keeps a fast Bluetooth connection to each lamp and sends it the newest colour.
 
-    Runs its own asyncio loop in a thread. Only the latest colour is kept per lamp,
-    so a slow or reconnecting lamp never builds up a backlog. On first connect it
-    reads the lamp's colour and brightness so they can be put back afterwards.
+    Runs its own asyncio loop in a thread. Only the latest colour is kept per lamp
+    and the next one goes out as soon as the lamp confirms the last (it echoes every
+    command), so nothing queues up in Windows' Bluetooth stack and the lamps never
+    fall behind the picture. The link asks Windows for its low-latency
+    ("throughput") connection mode: ~40 ms per colour instead of ~110-290 ms.
+    A lamp that stops answering is reconnected. On first connect it reads the
+    lamp's colour and brightness so they can be put back afterwards.
     """
+
+    STALL_S = 4.0                # no reply at all for this long while sending: reconnect
 
     def __init__(self):
         self.lock = threading.Lock()
         self.pending = {}            # addr -> {"power": .., "bright": .., "color": ..}
         self.state = {}              # addr -> "connecting" | "connected" | "not found" | error text
+        self.latency = {}            # addr -> smoothed ms from command to the lamp's confirmation
         self.saved = {}              # addr -> {"color": (r, g, b), "bright": v}
+        self.devices = {}            # addr -> BLEDevice from a scan (reconnects skip the scan)
+        self.wake = {}               # addr -> asyncio.Event: something new to send
         self.tasks = {}
         self.loop = None
         threading.Thread(target=self._thread, daemon=True).start()
@@ -329,9 +408,14 @@ class BleLink:
     def set(self, addr, **kw):
         with self.lock:
             self.pending.setdefault(addr, {}).update(kw)
+        ev = self.wake.get(addr)
+        if ev is not None and self.loop is not None:
+            self.loop.call_soon_threadsafe(ev.set)
 
     def connect(self, addrs):
         """Stay connected to exactly these lamps."""
+        addrs = set(addrs)
+
         def apply():
             for a in list(self.tasks):
                 if a not in addrs:
@@ -341,59 +425,108 @@ class BleLink:
                     self.tasks[a] = self.loop.create_task(self._lamp(a))
         self._call(apply)
 
+    @staticmethod
+    def _fast(client):
+        """Ask Windows for short Bluetooth connection intervals (Windows 11)."""
+        try:
+            from winrt.windows.devices.bluetooth import BluetoothLEPreferredConnectionParameters as P
+            client._backend._requester.request_preferred_connection_parameters(P.throughput_optimized)
+        except Exception:
+            pass
+
     async def _lamp(self, addr):
         import asyncio
         from bleak import BleakClient, BleakScanner
+        wake = self.wake.setdefault(addr, asyncio.Event())
+        ack = asyncio.Event()
         while True:
             try:
                 self.state[addr] = "connecting"
-                dev = await BleakScanner.find_device_by_address(addr, timeout=12.0)
+                dev = self.devices.get(addr)
                 if dev is None:
-                    self.state[addr] = "not found"          # busy with the Govee app, or out of range
-                    await asyncio.sleep(5)
-                    continue
-                async with BleakClient(dev, timeout=20.0) as c:
+                    dev = await BleakScanner.find_device_by_address(addr, timeout=12.0)
+                    if dev is None:
+                        self.state[addr] = "not found"      # busy with the Govee app, or out of range
+                        await asyncio.sleep(3)
+                        continue
+                    self.devices[addr] = dev
+                client = BleakClient(dev, timeout=15.0)
+                try:
+                    await client.connect()
+                except Exception:
+                    self.devices.pop(addr, None)            # stale: scan again next time
+                    raise
+                try:
+                    alive = [time.time()]                     # any reply at all = the lamp is still there
+
                     def note(_, d, addr=addr):
+                        alive[0] = time.time()
+                        if d[0] == 0x33:
+                            ack.set()
+                            return
                         s = self.saved.setdefault(addr, {})
                         if d[0] == 0xAA and d[1] == 0x05 and "color" not in s:
                             s["color"] = (d[3], d[4], d[5])
                         elif d[0] == 0xAA and d[1] == 0x04 and "bright" not in s:
                             s["bright"] = d[2]
-                    try:
-                        await c.start_notify(BLE_NOTIFY, note)
-                        if addr not in self.saved:            # remember how it was, to put it back later
-                            await c.write_gatt_char(BLE_WRITE, ble_packet(0xAA, 0x05, 0x01), response=False)
-                            await asyncio.sleep(0.15)
-                            await c.write_gatt_char(BLE_WRITE, ble_packet(0xAA, 0x04), response=False)
-                    except Exception:
-                        pass
+                    await client.start_notify(BLE_NOTIFY, note)
+                    self._fast(client)
+                    if addr not in self.saved:                # remember how it was, to put it back later
+                        await client.write_gatt_char(BLE_WRITE, ble_packet(0xAA, 0x05, 0x01), response=False)
+                        await asyncio.sleep(0.15)
+                        await client.write_gatt_char(BLE_WRITE, ble_packet(0xAA, 0x04), response=False)
+                        await asyncio.sleep(0.15)
                     self.state[addr] = "connected"
-                    last = time.time()
-                    while c.is_connected:
+                    last_cmd = alive[0] = time.time()
+                    wake.set()                                # send whatever is waiting right away
+                    while client.is_connected:
+                        try:
+                            await asyncio.wait_for(wake.wait(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            pass
+                        wake.clear()
                         with self.lock:
                             want = self.pending.pop(addr, None)
+                        cmds = []
                         if want:
                             if "power" in want:
-                                await c.write_gatt_char(BLE_WRITE, ble_packet(0x33, 0x01, int(want["power"])),
-                                                        response=False)
+                                cmds.append(ble_packet(0x33, 0x01, int(want["power"])))
                             if "bright" in want:
-                                await c.write_gatt_char(BLE_WRITE, ble_packet(0x33, 0x04, int(want["bright"])),
-                                                        response=False)
+                                cmds.append(ble_packet(0x33, 0x04, int(want["bright"])))
                             if "color" in want:
                                 r, g, b = want["color"]
-                                await c.write_gatt_char(BLE_WRITE, ble_packet(0x33, 0x05, 0x0D, r, g, b),
-                                                        response=False)
-                            last = time.time()
-                        elif time.time() - last > 2:          # keep-alive, or the lamp drops us
-                            await c.write_gatt_char(BLE_WRITE, ble_packet(0xAA, 0x01), response=False)
-                            last = time.time()
-                        await asyncio.sleep(0.06)
+                                cmds.append(ble_packet(0x33, 0x05, 0x0D, r, g, b))
+                        elif time.time() - last_cmd > 2:      # keep-alive, or the lamp drops us
+                            cmds.append(ble_packet(0xAA, 0x01))
+                        for pkt in cmds:
+                            ack.clear()
+                            t0 = time.perf_counter()
+                            await client.write_gatt_char(BLE_WRITE, pkt, response=False)
+                            last_cmd = time.time()
+                            if pkt[0] != 0x33:
+                                continue
+                            try:                              # pace on the lamp's echo: never queue up
+                                await asyncio.wait_for(ack.wait(), timeout=0.25)
+                                ms = (time.perf_counter() - t0) * 1000
+                                old = self.latency.get(addr)
+                                self.latency[addr] = ms if old is None else old + 0.1 * (ms - old)
+                            except asyncio.TimeoutError:
+                                pass
+                        if cmds and time.time() - alive[0] > self.STALL_S:
+                            raise RuntimeError("lamp stopped answering")   # reconnect
+                finally:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
             except asyncio.CancelledError:
                 self.state.pop(addr, None)
+                self.latency.pop(addr, None)
                 raise
             except Exception as e:
-                self.state[addr] = f"error: {e}"[:80]
-                await asyncio.sleep(3)
+                self.state[addr] = f"reconnecting ({e})"[:60]
+                self.latency.pop(addr, None)
+                await asyncio.sleep(1)
 
 
 _ble = None
@@ -423,8 +556,8 @@ class Ambient:
         self.lamps = [dict(l) for l in cfg.get("lamps", []) if l.get("ip") or l.get("ble")]
         self.screen = cfg.get("screen")                     # [x, y, w, h] of the chosen screen
         self.brightness = int(cfg.get("brightness", 100))
-        self.smooth = int(cfg.get("smooth", 45))
-        self.boost = int(cfg.get("boost", 130))
+        self.smooth = int(cfg.get("smooth", 25))
+        self.boost = int(cfg.get("boost", 150))
         self.want_on = bool(cfg.get("on", False))           # remembered: lights come back on at launch
         self.local_ip = local_ip
         self.running = False
@@ -447,7 +580,8 @@ class Ambient:
         """How the lamp is reached, for the UI."""
         if lamp.get("ble"):
             st = _ble.state.get(lamp["ble"]) if _ble else None
-            return "Bluetooth" + (f" · {st}" if st else "")
+            ms = _ble.latency.get(lamp["ble"]) if _ble else None
+            return "Bluetooth" + (f" · {st}" if st else "") + (f" · {ms:.0f} ms" if ms and st == "connected" else "")
         return f"Wi-Fi · {lamp['ip']}"
 
     def screen_rect(self):
@@ -573,30 +707,34 @@ class Ambient:
             ble_link().connect({l["ble"] for l in ble})
         for l in self.active():
             self.power(l, True)
-        grab, rect, bright_sent = None, None, None
+        grab, rect, bright_sent, linked = None, None, None, None
         state, last_send = {}, {}
         frames, t_fps = 0, time.time()
+        want, t_screen = self.screen_rect(), time.time()
         period = 1 / FPS
+        prev = time.perf_counter()
         try:
             while self.running:
                 t0 = time.perf_counter()
-                want = self.screen_rect()
+                dt, prev = min(0.25, t0 - prev), t0
+                if time.time() - t_screen > 2:                       # screens rarely change: check now and then
+                    want, t_screen = self.screen_rect(), time.time()
                 if grab is None or want != rect:
-                    if grab:
-                        grab.close()
-                    grab, rect = Grabber(want), want
+                    grab, rect = SharedGrabber(want), want
                 img = grab.grab()
                 lamps = self.active()
-                if ble:
-                    ble_link().connect({l["ble"] for l in lamps if l.get("ble")})   # follow lamps switched on/off
+                addrs = {l["ble"] for l in lamps if l.get("ble")}
+                if addrs != linked and (addrs or linked):            # follow lamps switched on/off
+                    ble_link().connect(addrs)
+                linked = addrs
                 if img is not None:
                     self.frame = (img * 255).astype(np.uint8)
                     if bright_sent != self.brightness:
                         bright_sent = self.brightness
                         for l in lamps:
                             self.bright(l, bright_sent)
-                    tau = 0.03 + (self.smooth / 100) ** 2 * 1.5          # seconds to follow a change
-                    base = 1 - math.exp(-period / tau)
+                    tau = 0.015 + (self.smooth / 100) ** 2 * 0.8          # seconds to follow a change
+                    base = 1 - math.exp(-dt / tau)
                     now = time.time()
                     for l in lamps:
                         key = lamp_key(l)
@@ -604,16 +742,19 @@ class Ambient:
                             continue
                         target = zone_color(img, l.get("zone", "Whole screen"), self.boost / 100)
                         s = state.setdefault(key, target.copy())
-                        a = max(base, 0.6) if np.abs(target - s).max() > 0.45 else base   # scene cut: catch up fast
+                        a = max(base, 0.7) if np.abs(target - s).max() > 0.35 else base   # scene cut: jump to it
                         s += a * (target - s)
                         v = np.clip(s, 0, 1) * 255
                         if v.max() < 4:                                  # black screen: just a faint glow
                             v = np.full(3, 4.0)
                         rgb = tuple(int(round(x)) for x in v)
                         old = self.colors.get(key)
+                        gap = now - last_send.get(key, 0)
+                        if not l.get("ble") and gap < 1 / LAN_RATE:      # Wi-Fi lamps drop floods of commands
+                            continue
                         if old is None or max(abs(p - q) for p, q in zip(rgb, old)) >= 2 \
-                                or now - last_send.get(key, 0) > 2:      # resend now and then: UDP can drop
-                            self.color(l, rgb)
+                                or gap > 2:                              # resend now and then: UDP can drop
+                            self.color(l, rgb)                           # Bluetooth: newest only, paced by the lamp
                             self.colors[key], last_send[key] = rgb, now
                     frames += 1
                 if time.time() - t_fps >= 1:

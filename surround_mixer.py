@@ -2082,7 +2082,7 @@ class LightsWindow(tk.Toplevel):
         if frame is None:
             if time.time() - self.preview_at > 1.0:            # lights off: still show what they'd do
                 self.preview_at = time.time()
-                g = ambient.Grabber(self.amb.screen_rect())
+                g = ambient.SharedGrabber(self.amb.screen_rect())
                 img = g.grab()
                 g.close()
                 self.preview = None if img is None else (img * 255).astype(np.uint8)
